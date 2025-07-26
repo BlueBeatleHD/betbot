@@ -47,6 +47,7 @@ MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
 # Lottery settings
+INITIAL_POT = 500  # Starting pot for the lottery
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
@@ -54,6 +55,7 @@ MATCH5_PERCENT = 0.3
 MATCH4_PERCENT = 0.1
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
+- Starting Pot: {INITIAL_POT} points
 - Cost: {LOTTERY_COST} points per ticket
 - Pick 5 main numbers (1-30) + 1 Powerball (1-10)
 - Jackpot: 60% of pot (minimum 100 points)
@@ -95,7 +97,7 @@ def load_data():
             last_message_time = data.get('last_message_time', {})
             voice_time_tracking = data.get('voice_time_tracking', {})
             voice_channel_points = defaultdict(int, data.get('voice_channel_points', {}))
-            lottery_pot = data.get('lottery_pot', 0)
+            lottery_pot = data.get('lottery_pot', INITIAL_POT)  # Use INITIAL_POT as default
             lottery_history = data.get('lottery_history', [])
             lottery_winners = data.get('lottery_winners', [])
     except (FileNotFoundError, json.JSONDecodeError):
@@ -105,7 +107,7 @@ def load_data():
         last_message_time = {}
         voice_time_tracking = {}
         voice_channel_points = defaultdict(int)
-        lottery_pot = 0
+        lottery_pot = INITIAL_POT  # Initialize with starting pot
         lottery_history = []
         lottery_winners = []
         save_data()
@@ -610,7 +612,7 @@ async def cancel_bet(ctx, bet_id: str):
 async def show_lottery_rules(ctx):
     embed = discord.Embed(
         title="🎰 Lottery Information",
-        description=TICKET_RULES,
+        description=TICKET_RULES + f"\n\n🏦 **Initial pot:** {INITIAL_POT} points",
         color=0x00FF00
     )
     embed.add_field(
@@ -684,6 +686,14 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
         f"Pot is now: **{lottery_pot} points**"
     )
 
+@bot.command(name='resetpot', help='Reset lottery pot to initial amount (Admin only)')
+@admin_required()
+async def reset_pot(ctx):
+    global lottery_pot
+    lottery_pot = INITIAL_POT
+    save_data()
+    await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
+    
 @bot.command(name='drawlottery', help='Run lottery draw (Admin only)')
 @admin_required()
 async def draw_lottery(ctx):
