@@ -36,6 +36,7 @@ voice_start_times = {}
 voice_channel_points = defaultdict(int)
 lottery_pot = 0
 lottery_history = []
+lottery_winners = []
 
 # Configuration
 ADMIN_ROLE_NAME = "Bot Admin"
@@ -55,9 +56,11 @@ TICKET_RULES = f"""
 🎟 **Lottery Rules:**
 - Cost: {LOTTERY_COST} points per ticket
 - Pick 5 main numbers (1-30) + 1 Powerball (1-10)
-- Jackpot accumulates until won (60% of pot)
-- Matching just Powerball wins {POWERBALL_BONUS} points
-- Draws occur when admin runs `$drawlottery`
+- Jackpot: 60% of pot (minimum 100 points)
+- Match 5 main: 30% of pot
+- Match 4 main: 10% of pot
+- Powerball match: {POWERBALL_BONUS} points
+- Use `$quickticket` for random numbers
 """
 
 def get_example(command_name):
@@ -74,13 +77,15 @@ def get_example(command_name):
         "leaderboard": "",
         "activebets": "",
         "buyticket": "1 2 3 4 5 6",
+        "quickticket": "",
         "drawlottery": "",
-        "lotteryrules": ""
+        "lotteryrules": "",
+        "lotterystats": ""
     }
     return examples.get(command_name, "")
 
 def load_data():
-    global user_points, active_bets, last_daily, last_message_time, voice_time_tracking, voice_channel_points, lottery_pot, lottery_history
+    global user_points, active_bets, last_daily, last_message_time, voice_time_tracking, voice_channel_points, lottery_pot, lottery_history, lottery_winners
     try:
         with open('data.json', 'r') as f:
             data = json.load(f)
@@ -92,6 +97,7 @@ def load_data():
             voice_channel_points = defaultdict(int, data.get('voice_channel_points', {}))
             lottery_pot = data.get('lottery_pot', 0)
             lottery_history = data.get('lottery_history', [])
+            lottery_winners = data.get('lottery_winners', [])
     except (FileNotFoundError, json.JSONDecodeError):
         user_points = {}
         active_bets = {}
@@ -101,6 +107,7 @@ def load_data():
         voice_channel_points = defaultdict(int)
         lottery_pot = 0
         lottery_history = []
+        lottery_winners = []
         save_data()
 
 def save_data():
@@ -113,7 +120,8 @@ def save_data():
             'voice_time_tracking': voice_time_tracking,
             'voice_channel_points': dict(voice_channel_points),
             'lottery_pot': lottery_pot,
-            'lottery_history': lottery_history
+            'lottery_history': lottery_history,
+            'lottery_winners': lottery_winners
         }, f, indent=4)
 
 def ensure_user(user_id):
@@ -610,6 +618,30 @@ async def show_lottery_rules(ctx):
         value=f"{lottery_pot} points ({len(lottery_history)} tickets sold)",
         inline=False
     )
+    embed.add_field(
+        name="Last Draw",
+        value=lottery_winners[-1]['main'] + [lottery_winners[-1]['powerball']] if lottery_winners else "No draws yet",
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(
+    name='quickticket',
+    help='Generate random lottery numbers'
+)
+async def quick_pick(ctx):
+    main_numbers = sorted(random.sample(range(1, 31), 5))
+    powerball = random.randint(1, 10)
+    
+    embed = discord.Embed(
+        title="🎟️ Quick-Pick Numbers",
+        description=(
+            f"**Main Numbers:** {', '.join(map(str, main_numbers))}\n"
+            f"**Powerball:** {powerball}"
+        ),
+        color=0x7289DA
+    )
+    embed.set_footer(text=f"Buy with: $buyticket {' '.join(map(str, main_numbers))} {powerball}")
     await ctx.send(embed=embed)
 
 @bot.command(
@@ -655,7 +687,7 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
 @bot.command(name='drawlottery', help='Run lottery draw (Admin only)')
 @admin_required()
 async def draw_lottery(ctx):
-    global lottery_pot, lottery_history
+    global lottery_pot, lottery_history, lottery_winners
     
     if len(lottery_history) < 3:
         return await ctx.send("❌ Need at least 3 tickets to draw")
@@ -664,33 +696,66 @@ async def draw_lottery(ctx):
     winning_main = sorted(random.sample(range(1, 31), 5))
     winning_pb = random.randint(1, 10)
     
+    # Record draw
+    lottery_winners.append({
+        'main': winning_main,
+        'powerball': winning_pb,
+        'time': datetime.now().isoformat()
+    })
+    
     # Check winners
     jackpot_winners = [
         t for t in lottery_history 
         if set(t['numbers']) == set(winning_main) and t['powerball'] == winning_pb
     ]
+    match5_winners = [
+        t for t in lottery_history 
+        if set(t['numbers']) == set(winning_main) and t['powerball'] != winning_pb
+    ]
+    match4_winners = [
+        t for t in lottery_history 
+        if len(set(t['numbers']) & set(winning_main)) == 4
+    ]
     powerball_winners = [t for t in lottery_history if t['powerball'] == winning_pb]
     
     # Calculate payouts
     powerball_cost = len(powerball_winners) * POWERBALL_BONUS
-    remaining_pot = max(0, lottery_pot - powerball_cost)  # Prevent negative
+    remaining_pot = max(0, lottery_pot - powerball_cost)
     
     # Build result message
     result_msg = []
+    
+    # Pay Powerball winners first
+    for ticket in powerball_winners:
+        user_points[ticket['user']] += POWERBALL_BONUS
+        result_msg.append(f"🎯 Powerball: <@{ticket['user']}> +{POWERBALL_BONUS} points")
+    
+    # Pay jackpot winners (60%)
     if jackpot_winners:
         jackpot_prize = int(remaining_pot * JACKPOT_PERCENT / len(jackpot_winners))
         for ticket in jackpot_winners:
             user_points[ticket['user']] += jackpot_prize
             result_msg.append(f"🏆 **JACKPOT**: <@{ticket['user']}> won {jackpot_prize} points!")
-        new_pot = 0
-    else:
-        new_pot = remaining_pot
-        result_msg.append(f"💎 **JACKPOT ROLLS OVER!** New pot: {lottery_pot + new_pot} points")
+        remaining_pot -= jackpot_prize * len(jackpot_winners)
     
-    # Pay Powerball winners
-    for ticket in powerball_winners:
-        user_points[ticket['user']] += POWERBALL_BONUS
-        result_msg.append(f"🎯 Powerball: <@{ticket['user']}> +{POWERBALL_BONUS} points")
+    # Pay match5 winners (30%)
+    if match5_winners:
+        match5_prize = int(remaining_pot * MATCH5_PERCENT / len(match5_winners))
+        for ticket in match5_winners:
+            user_points[ticket['user']] += match5_prize
+            result_msg.append(f"💰 Match 5: <@{ticket['user']}> +{match5_prize} points")
+        remaining_pot -= match5_prize * len(match5_winners)
+    
+    # Pay match4 winners (10%)
+    if match4_winners:
+        match4_prize = int(remaining_pot * MATCH4_PERCENT / len(match4_winners))
+        for ticket in match4_winners:
+            user_points[ticket['user']] += match4_prize
+            result_msg.append(f"🎫 Match 4: <@{ticket['user']}> +{match4_prize} points")
+        remaining_pot -= match4_prize * len(match4_winners)
+    
+    # Determine new pot
+    new_pot = remaining_pot if not jackpot_winners else 0
     
     # Update and save
     lottery_pot = new_pot
@@ -703,12 +768,61 @@ async def draw_lottery(ctx):
         description=(
             f"Winning Numbers: **{', '.join(map(str, winning_main))}** + **{winning_pb}**\n"
             f"```{len(jackpot_winners)} Jackpot Winner(s)\n"
+            f"{len(match5_winners)} Match-5 Winner(s)\n"
+            f"{len(match4_winners)} Match-4 Winner(s)\n"
             f"{len(powerball_winners)} Powerball Winner(s)```"
         ),
         color=0xFFD700
     )
     if result_msg:
         embed.add_field(name="Payouts", value="\n".join(result_msg), inline=False)
+    if new_pot > 0:
+        embed.add_field(name="💎 Jackpot Rolls Over", value=f"New pot: {new_pot} points", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name='lotterystats', help='Show historical lottery stats')
+async def lottery_stats(ctx):
+    if not lottery_winners:
+        return await ctx.send("No draws yet!")
+    
+    # Calculate frequency
+    main_counts = defaultdict(int)
+    pb_counts = defaultdict(int)
+    
+    for draw in lottery_winners:
+        for num in draw['main']:
+            main_counts[num] += 1
+        pb_counts[draw['powerball']] += 1
+    
+    # Top hot numbers
+    hot_main = sorted(main_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    hot_pb = sorted(pb_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    # Cold numbers (never or rarely drawn)
+    all_main = set(range(1, 31))
+    drawn_main = set(main_counts.keys())
+    cold_main = sorted(all_main - drawn_main) or ["None"]
+    
+    embed = discord.Embed(
+        title="📊 Lottery Statistics",
+        description=f"Analyzing {len(lottery_winners)} past draws",
+        color=0x00FFFF
+    )
+    embed.add_field(
+        name="🔥 Hot Main Numbers",
+        value="\n".join(f"{num}: {count}x" for num, count in hot_main),
+        inline=True
+    )
+    embed.add_field(
+        name="❄️ Cold Main Numbers",
+        value=", ".join(map(str, cold_main[:5])),
+        inline=True
+    )
+    embed.add_field(
+        name="🔥 Hot Powerballs",
+        value="\n".join(f"{num}: {count}x" for num, count in hot_pb),
+        inline=False
+    )
     await ctx.send(embed=embed)
 
 # Start the bot
