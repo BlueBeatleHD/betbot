@@ -46,18 +46,20 @@ DAILY_RESET_MINUTE = 0
 MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
-# Lottery settings
-INITIAL_POT = 500  # Starting pot for the lottery
+# Lottery settings (UPDATED RANGE: 1-25 instead of 1-30)
+INITIAL_POT = 500
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
 MATCH5_PERCENT = 0.3
 MATCH4_PERCENT = 0.1
+MAIN_NUMBER_RANGE = range(1, 26)  # CHANGED FROM 30 TO 25
+POWERBALL_RANGE = range(1, 11)
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
 - Starting Pot: {INITIAL_POT} points
 - Cost: {LOTTERY_COST} points per ticket
-- Pick 5 main numbers (1-30) + 1 Powerball (1-10)
+- Pick 5 main numbers (1-25) + 1 Powerball (1-10)  # UPDATED RANGE
 - Jackpot: 60% of pot (minimum 100 points)
 - Match 5 main: 30% of pot
 - Match 4 main: 10% of pot
@@ -82,7 +84,8 @@ def get_example(command_name):
         "quickticket": "",
         "drawlottery": "",
         "lotteryrules": "",
-        "lotterystats": ""
+        "lotterystats": "",
+        "resetpot": ""
     }
     return examples.get(command_name, "")
 
@@ -97,7 +100,7 @@ def load_data():
             last_message_time = data.get('last_message_time', {})
             voice_time_tracking = data.get('voice_time_tracking', {})
             voice_channel_points = defaultdict(int, data.get('voice_channel_points', {}))
-            lottery_pot = data.get('lottery_pot', INITIAL_POT)  # Use INITIAL_POT as default
+            lottery_pot = data.get('lottery_pot', INITIAL_POT)
             lottery_history = data.get('lottery_history', [])
             lottery_winners = data.get('lottery_winners', [])
     except (FileNotFoundError, json.JSONDecodeError):
@@ -107,7 +110,7 @@ def load_data():
         last_message_time = {}
         voice_time_tracking = {}
         voice_channel_points = defaultdict(int)
-        lottery_pot = INITIAL_POT  # Initialize with starting pot
+        lottery_pot = INITIAL_POT
         lottery_history = []
         lottery_winners = []
         save_data()
@@ -607,12 +610,12 @@ async def cancel_bet(ctx, bet_id: str):
     embed.add_field(name="Options", value=f"1) {bet['options'][0]}\n2) {bet['options'][1]}")
     await ctx.send(embed=embed)
 
-# Lottery system
+# Lottery system (UPDATED TO 1-25 MAIN NUMBERS)
 @bot.command(name='lotteryrules', help='Show lottery rules and current pot')
 async def show_lottery_rules(ctx):
     embed = discord.Embed(
         title="🎰 Lottery Information",
-        description=TICKET_RULES + f"\n\n🏦 **Initial pot:** {INITIAL_POT} points",
+        description=TICKET_RULES,
         color=0x00FF00
     )
     embed.add_field(
@@ -632,8 +635,8 @@ async def show_lottery_rules(ctx):
     help='Generate random lottery numbers'
 )
 async def quick_pick(ctx):
-    main_numbers = sorted(random.sample(range(1, 31), 5))
-    powerball = random.randint(1, 10)
+    main_numbers = sorted(random.sample(MAIN_NUMBER_RANGE, 5))  # UPDATED RANGE
+    powerball = random.choice(list(POWERBALL_RANGE))
     
     embed = discord.Embed(
         title="🎟️ Quick-Pick Numbers",
@@ -655,11 +658,11 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
     user_id = str(ctx.author.id)
     ensure_user(user_id)
     
-    # Validate numbers
+    # Validate numbers (UPDATED TO 1-25)
     main_numbers = {n1, n2, n3, n4, n5}
-    if len(main_numbers) != 5 or any(n < 1 or n > 30 for n in main_numbers):
-        return await ctx.send("❌ Pick 5 unique numbers between 1-30")
-    if pb < 1 or pb > 10:
+    if len(main_numbers) != 5 or any(n not in MAIN_NUMBER_RANGE for n in main_numbers):
+        return await ctx.send("❌ Pick 5 unique numbers between 1-25")  # UPDATED ERROR MESSAGE
+    if pb not in POWERBALL_RANGE:
         return await ctx.send("❌ Powerball must be 1-10")
     
     # Charge points
@@ -686,14 +689,6 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
         f"Pot is now: **{lottery_pot} points**"
     )
 
-@bot.command(name='resetpot', help='Reset lottery pot to initial amount (Admin only)')
-@admin_required()
-async def reset_pot(ctx):
-    global lottery_pot
-    lottery_pot = INITIAL_POT
-    save_data()
-    await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
-    
 @bot.command(name='drawlottery', help='Run lottery draw (Admin only)')
 @admin_required()
 async def draw_lottery(ctx):
@@ -702,9 +697,9 @@ async def draw_lottery(ctx):
     if len(lottery_history) < 3:
         return await ctx.send("❌ Need at least 3 tickets to draw")
     
-    # Generate winning numbers
-    winning_main = sorted(random.sample(range(1, 31), 5))
-    winning_pb = random.randint(1, 10)
+    # Generate winning numbers (UPDATED TO 1-25)
+    winning_main = sorted(random.sample(MAIN_NUMBER_RANGE, 5))
+    winning_pb = random.choice(list(POWERBALL_RANGE))
     
     # Record draw
     lottery_winners.append({
@@ -809,7 +804,7 @@ async def lottery_stats(ctx):
     hot_pb = sorted(pb_counts.items(), key=lambda x: x[1], reverse=True)[:3]
     
     # Cold numbers (never or rarely drawn)
-    all_main = set(range(1, 31))
+    all_main = set(MAIN_NUMBER_RANGE)  # UPDATED RANGE
     drawn_main = set(main_counts.keys())
     cold_main = sorted(all_main - drawn_main) or ["None"]
     
@@ -834,6 +829,14 @@ async def lottery_stats(ctx):
         inline=False
     )
     await ctx.send(embed=embed)
+
+@bot.command(name='resetpot', help='Reset lottery pot to initial amount (Admin only)')
+@admin_required()
+async def reset_pot(ctx):
+    global lottery_pot
+    lottery_pot = INITIAL_POT
+    save_data()
+    await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
 
 # Start the bot
 if __name__ == "__main__":
