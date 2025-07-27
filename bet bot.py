@@ -46,14 +46,14 @@ DAILY_RESET_MINUTE = 0
 MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
-# Lottery settings (updated with 1-25 range and odds)
+# Lottery settings
 INITIAL_POT = 500
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
 MATCH5_PERCENT = 0.3
 MATCH4_PERCENT = 0.1
-MAIN_NUMBER_RANGE = range(1, 26)  # Changed from 30 to 25
+MAIN_NUMBER_RANGE = range(1, 26)
 POWERBALL_RANGE = range(1, 11)
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
@@ -71,21 +71,28 @@ TICKET_RULES = f"""
 def get_example(command_name):
     """Returns example usage for commands"""
     examples = {
-        "createbet": "WillItRain? Yes No 60",
-        "placebet": "abc123 1 50",
-        "resolvebet": "abc123 1",
-        "cancelbet": "abc123",
-        "givepoints": "@User 100",
-        "daily": "",
+        # Points System
         "points": "",
+        "daily": "",
         "voicepoints": "",
         "leaderboard": "",
+        
+        # Betting System
+        "createbet": "WillItRain? Yes No 60",
+        "placebet": "abc123 1 50",
         "activebets": "",
-        "buyticket": "1 2 3 4 5 6",
-        "quickticket": "3",
-        "drawlottery": "",
+        
+        # Lottery System
         "lotteryrules": "",
+        "quickticket": "3",
+        "buyticket": "1 2 3 4 5 6",
         "lotterystats": "",
+        
+        # Admin Commands
+        "givepoints": "@User 100",
+        "resolvebet": "abc123 1",
+        "cancelbet": "abc123",
+        "drawlottery": "",
         "resetpot": ""
     }
     return examples.get(command_name, "")
@@ -297,7 +304,9 @@ async def on_voice_state_update(member, before, after):
         else:
             voice_start_times[user_id] = now
 
-# Points system
+# ======================
+# POINTS SYSTEM COMMANDS
+# ======================
 @bot.command(name='points', help='Check your points balance')
 async def check_points(ctx):
     points = ensure_user(ctx.author.id)
@@ -359,79 +368,12 @@ async def show_leaderboard(ctx):
     
     await ctx.send(embed=embed)
 
-# Admin commands
-def admin_required():
-    async def predicate(ctx):
-        if not is_admin(ctx.author):
-            raise commands.CheckFailure()
-        return True
-    return commands.check(predicate)
-
-@bot.command(
-    name='givepoints',
-    help='Give points to a user (Admin only)',
-    usage="<user> <amount>"
-)
-@admin_required()
-async def give_points(ctx, user: discord.Member, amount: int):
-    try:
-        if user.bot:
-            raise commands.BadArgument("Cannot give points to bots!")
-        if amount <= 0:
-            raise commands.BadArgument("Amount must be positive!")
-        if amount > 10000:
-            raise commands.BadArgument("Cannot give more than 10,000 points at once!")
-        
-        ensure_user(user.id)
-        user_points[str(user.id)] += amount
-        save_data()
-        
-        embed = discord.Embed(
-            title="✅ Points Added",
-            description=f"{ctx.author.mention} gave {amount} points to {user.mention}",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="New Balance", value=f"{user_points[str(user.id)]} points")
-        await ctx.send(embed=embed)
-
-    except commands.BadArgument as e:
-        await ctx.send(f"❌ {e}", delete_after=15)
-
-# Betting system
-@bot.command(
-    name='activebets',
-    help='Show all active betting events'
-)
-async def show_active_bets(ctx):
-    if not active_bets:
-        return await ctx.send("No active bets currently running.")
-    
-    embed = discord.Embed(
-        title="🎲 Active Bets",
-        color=discord.Color.blue()
-    )
-    
-    for bet_id, bet in active_bets.items():
-        if not bet['resolved'] and datetime.fromisoformat(bet['end_time']) > datetime.now():
-            creator = await bot.fetch_user(bet['creator'])
-            time_left = datetime.fromisoformat(bet['end_time']) - datetime.now()
-            
-            embed.add_field(
-                name=f"ID: {bet_id} - {bet['name']}",
-                value=(
-                    f"Creator: {creator.mention}\n"
-                    f"Options: 1) {bet['options'][0]} | 2) {bet['options'][1]}\n"
-                    f"Time left: {str(time_left).split('.')[0]}\n"
-                    f"Cancel with: `{ctx.prefix}cancelbet {bet_id}`"
-                ),
-                inline=False
-            )
-    
-    await ctx.send(embed=embed)
-
+# ======================
+# BETTING SYSTEM COMMANDS
+# ======================
 @bot.command(
     name='createbet',
-    help='Create a new betting event (1 min to 24 hours)',
+    help='Create a new betting event',
     usage="<name> <option1> <option2> [duration_minutes=5]"
 )
 async def create_bet(ctx, name: str, option1: str, option2: str, duration_minutes: int = 5):
@@ -510,8 +452,309 @@ async def place_bet(ctx, bet_id: str, option_number: int, amount: int):
     await ctx.send(embed=embed)
 
 @bot.command(
+    name='activebets',
+    help='Show all active betting events'
+)
+async def show_active_bets(ctx):
+    if not active_bets:
+        return await ctx.send("No active bets currently running.")
+    
+    embed = discord.Embed(
+        title="🎲 Active Bets",
+        color=discord.Color.blue()
+    )
+    
+    for bet_id, bet in active_bets.items():
+        if not bet['resolved'] and datetime.fromisoformat(bet['end_time']) > datetime.now():
+            creator = await bot.fetch_user(bet['creator'])
+            time_left = datetime.fromisoformat(bet['end_time']) - datetime.now()
+            
+            embed.add_field(
+                name=f"ID: {bet_id} - {bet['name']}",
+                value=(
+                    f"Creator: {creator.mention}\n"
+                    f"Options: 1) {bet['options'][0]} | 2) {bet['options'][1]}\n"
+                    f"Time left: {str(time_left).split('.')[0]}\n"
+                    f"Cancel with: `{ctx.prefix}cancelbet {bet_id}`"
+                ),
+                inline=False
+            )
+    
+    await ctx.send(embed=embed)
+
+# ======================
+# LOTTERY SYSTEM COMMANDS
+# ======================
+@bot.command(name='lotteryrules', help='Show lottery rules and current pot')
+async def show_lottery_rules(ctx):
+    embed = discord.Embed(
+        title="🎰 Lottery Information",
+        description=TICKET_RULES,
+        color=0x00FF00
+    )
+    embed.add_field(
+        name="Current Pot", 
+        value=f"{lottery_pot} points ({len(lottery_history)} tickets sold)",
+        inline=False
+    )
+    embed.add_field(
+        name="Last Draw",
+        value=lottery_winners[-1]['main'] + [lottery_winners[-1]['powerball']] if lottery_winners else "No draws yet",
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(
+    name='quickticket',
+    help='Generate AND buy random lottery tickets',
+    usage="[amount=1]"
+)
+async def quick_pick(ctx, amount: int = 1):
+    user_id = str(ctx.author.id)
+    ensure_user(user_id)
+    
+    if amount <= 0:
+        return await ctx.send("❌ Amount must be at least 1")
+    if amount > 5:
+        return await ctx.send("❌ Max 5 tickets at once (for clean formatting)")
+    
+    total_cost = LOTTERY_COST * amount
+    if user_points[user_id] < total_cost:
+        return await ctx.send(
+            f"❌ You need {total_cost} points for {amount} tickets "
+            f"(You have: {user_points[user_id]})"
+        )
+    
+    # Process purchase
+    user_points[user_id] -= total_cost
+    global lottery_pot
+    lottery_pot += total_cost
+    
+    # Generate tickets
+    tickets = []
+    for _ in range(amount):
+        main_numbers = sorted(random.sample(MAIN_NUMBER_RANGE, 5))
+        powerball = random.choice(list(POWERBALL_RANGE))
+        tickets.append((main_numbers, powerball))
+        lottery_history.append({
+            'user': user_id,
+            'numbers': main_numbers,
+            'powerball': powerball,
+            'time': datetime.now().isoformat()
+        })
+    
+    save_data()
+    
+    # Bingo-style display
+    def create_bingo_card(numbers, pb):
+        card = "```diff\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "| Main Numbers           | Powerball |\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        num_cells = "|"
+        for num in numbers:
+            num_cells += f" {str(num).center(3)} |"
+        num_cells += f" {f'PB{pb}'.center(3)} |"
+        card += num_cells + "\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "```"
+        return card
+    
+    visual_tickets = []
+    for i, (nums, pb) in enumerate(tickets):
+        visual_tickets.append(
+            f"**Ticket #{i+1}**\n"
+            f"{create_bingo_card(nums, pb)}"
+        )
+    
+    embed = discord.Embed(
+        title=f"🎰 {'Tickets' if amount > 1 else 'Ticket'} Purchased",
+        color=0x00FF00 if amount > 1 else 0x7289DA
+    )
+    
+    embed.add_field(
+        name=f"Your {'Tickets' if amount > 1 else 'Ticket'}",
+        value="\n".join(visual_tickets),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="Transaction Summary",
+        value=(
+            f"```diff\n"
+            f"- Spent: {total_cost} points\n"
+            f"+ Tickets: {amount}\n"
+            f"= Balance: {user_points[user_id]} points\n"
+            f"```"
+            f"🏦 Pot: {lottery_pot} points"
+        ),
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(
+    name='buyticket',
+    help='Buy lottery ticket with specific numbers',
+    usage="<num1> <num2> <num3> <num4> <num5> <powerball>"
+)
+async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, pb: int):
+    user_id = str(ctx.author.id)
+    ensure_user(user_id)
+    
+    # Validate numbers
+    main_numbers = {n1, n2, n3, n4, n5}
+    if len(main_numbers) != 5 or any(n not in MAIN_NUMBER_RANGE for n in main_numbers):
+        return await ctx.send("❌ Pick 5 unique numbers between 1-25")
+    if pb not in POWERBALL_RANGE:
+        return await ctx.send("❌ Powerball must be 1-10")
+    
+    # Charge points
+    if user_points[user_id] < LOTTERY_COST:
+        return await ctx.send(f"❌ You need {LOTTERY_COST} points (You have: {user_points[user_id]})")
+    
+    user_points[user_id] -= LOTTERY_COST
+    global lottery_pot
+    lottery_pot += LOTTERY_COST
+    
+    # Store ticket
+    ticket = {
+        'user': user_id,
+        'numbers': sorted(main_numbers),
+        'powerball': pb,
+        'time': datetime.now().isoformat()
+    }
+    lottery_history.append(ticket)
+    save_data()
+    
+    # Create bingo display
+    def create_bingo_card(numbers, pb):
+        card = "```diff\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "| Main Numbers           | Powerball |\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        num_cells = "|"
+        for num in numbers:
+            num_cells += f" {str(num).center(3)} |"
+        num_cells += f" {f'PB{pb}'.center(3)} |"
+        card += num_cells + "\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "```"
+        return card
+    
+    embed = discord.Embed(
+        title="🎟️ Custom Ticket Purchased",
+        color=0x7289DA
+    )
+    embed.add_field(
+        name="Your Ticket",
+        value=create_bingo_card(sorted(main_numbers), pb),
+        inline=False
+    )
+    embed.add_field(
+        name="Transaction",
+        value=(
+            f"```diff\n"
+            f"- {LOTTERY_COST} points\n"
+            f"= Balance: {user_points[user_id]} points\n"
+            f"```"
+            f"🏦 Pot: {lottery_pot} points"
+        ),
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='lotterystats', help='Show historical lottery stats')
+async def lottery_stats(ctx):
+    if not lottery_winners:
+        return await ctx.send("No draws yet!")
+    
+    # Calculate frequency
+    main_counts = defaultdict(int)
+    pb_counts = defaultdict(int)
+    
+    for draw in lottery_winners:
+        for num in draw['main']:
+            main_counts[num] += 1
+        pb_counts[draw['powerball']] += 1
+    
+    # Top hot numbers
+    hot_main = sorted(main_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    hot_pb = sorted(pb_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    # Cold numbers (never or rarely drawn)
+    all_main = set(MAIN_NUMBER_RANGE)
+    drawn_main = set(main_counts.keys())
+    cold_main = sorted(all_main - drawn_main) or ["None"]
+    
+    embed = discord.Embed(
+        title="📊 Lottery Statistics",
+        description=f"Analyzing {len(lottery_winners)} past draws",
+        color=0x00FFFF
+    )
+    embed.add_field(
+        name="🔥 Hot Main Numbers",
+        value="\n".join(f"{num}: {count}x" for num, count in hot_main),
+        inline=True
+    )
+    embed.add_field(
+        name="❄️ Cold Main Numbers",
+        value=", ".join(map(str, cold_main[:5])),
+        inline=True
+    )
+    embed.add_field(
+        name="🔥 Hot Powerballs",
+        value="\n".join(f"{num}: {count}x" for num, count in hot_pb),
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+# ======================
+# ADMIN COMMANDS
+# ======================
+def admin_required():
+    async def predicate(ctx):
+        if not is_admin(ctx.author):
+            raise commands.CheckFailure()
+        return True
+    return commands.check(predicate)
+
+@bot.command(
+    name='givepoints',
+    help='[OWNER] Give points to a user (Bot Owner Only)',
+    usage="<user> <amount>"
+)
+@commands.is_owner()
+async def give_points(ctx, user: discord.Member, amount: int):
+    try:
+        if user.bot:
+            raise commands.BadArgument("Cannot give points to bots!")
+        if amount <= 0:
+            raise commands.BadArgument("Amount must be positive!")
+        if amount > 10000:
+            raise commands.BadArgument("Cannot give more than 10,000 points at once!")
+        
+        ensure_user(user.id)
+        user_points[str(user.id)] += amount
+        save_data()
+        
+        embed = discord.Embed(
+            title="✅ Points Added",
+            description=f"{ctx.author.mention} gave {amount} points to {user.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="New Balance", value=f"{user_points[str(user.id)]} points")
+        await ctx.send(embed=embed)
+
+    except commands.BadArgument as e:
+        await ctx.send(f"❌ {e}", delete_after=15)
+    except commands.NotOwner:
+        await ctx.send("❌ This command can only be used by the bot owner!", delete_after=10)
+
+@bot.command(
     name='resolvebet',
-    help='Resolve a betting event (Admin only)',
+    help='[ADMIN] Resolve a betting event',
     usage="<bet_id> <winning_option_number>"
 )
 @admin_required()
@@ -575,7 +818,7 @@ async def resolve_bet(ctx, bet_id: str, winning_option_number: int):
 
 @bot.command(
     name='cancelbet',
-    help='Cancel an active bet and refund all points (Admin only)',
+    help='[ADMIN] Cancel an active bet',
     usage="<bet_id>"
 )
 @admin_required()
@@ -611,190 +854,11 @@ async def cancel_bet(ctx, bet_id: str):
     embed.add_field(name="Options", value=f"1) {bet['options'][0]}\n2) {bet['options'][1]}")
     await ctx.send(embed=embed)
 
-# Lottery system (updated with bingo-style display)
-@bot.command(name='lotteryrules', help='Show lottery rules and current pot')
-async def show_lottery_rules(ctx):
-    embed = discord.Embed(
-        title="🎰 Lottery Information",
-        description=TICKET_RULES,
-        color=0x00FF00
-    )
-    embed.add_field(
-        name="Current Pot", 
-        value=f"{lottery_pot} points ({len(lottery_history)} tickets sold)",
-        inline=False
-    )
-    embed.add_field(
-        name="Last Draw",
-        value=lottery_winners[-1]['main'] + [lottery_winners[-1]['powerball']] if lottery_winners else "No draws yet",
-        inline=False
-    )
-    await ctx.send(embed=embed)
-
 @bot.command(
-    name='quickticket',
-    help='Generate AND buy random lottery tickets',
-    usage="[amount=1]"
+    name='drawlottery',
+    help='[ADMIN] Run lottery draw',
+    usage=""
 )
-async def quick_pick(ctx, amount: int = 1):
-    user_id = str(ctx.author.id)
-    ensure_user(user_id)
-    
-    if amount <= 0:
-        return await ctx.send("❌ Amount must be at least 1")
-    if amount > 5:
-        return await ctx.send("❌ Max 5 tickets at once (for clean formatting)")
-    
-    total_cost = LOTTERY_COST * amount
-    if user_points[user_id] < total_cost:
-        return await ctx.send(
-            f"❌ You need {total_cost} points for {amount} tickets "
-            f"(You have: {user_points[user_id]})"
-        )
-    
-    # Process purchase
-    user_points[user_id] -= total_cost
-    global lottery_pot
-    lottery_pot += total_cost
-    
-    # Generate tickets
-    tickets = []
-    for _ in range(amount):
-        main_numbers = sorted(random.sample(MAIN_NUMBER_RANGE, 5))
-        powerball = random.choice(list(POWERBALL_RANGE))
-        tickets.append((main_numbers, powerball))
-        lottery_history.append({
-            'user': user_id,
-            'numbers': main_numbers,
-            'powerball': powerball,
-            'time': datetime.now().isoformat()
-        })
-    
-    save_data()
-    
-    # Bingo-style display function
-    def create_bingo_card(numbers, pb):
-        card = "```diff\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "| Main Numbers           | Powerball |\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        num_cells = "|"
-        for num in numbers:
-            num_cells += f" {str(num).center(3)} |"
-        num_cells += f" {f'PB{pb}'.center(3)} |"
-        card += num_cells + "\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "```"
-        return card
-    
-    # Build visual tickets
-    visual_tickets = []
-    for i, (nums, pb) in enumerate(tickets):
-        visual_tickets.append(
-            f"**Ticket #{i+1}**\n"
-            f"{create_bingo_card(nums, pb)}"
-        )
-    
-    # Build embed
-    embed = discord.Embed(
-        title=f"🎰 {'Tickets' if amount > 1 else 'Ticket'} Purchased",
-        color=0x00FF00 if amount > 1 else 0x7289DA
-    )
-    
-    embed.add_field(
-        name=f"Your {'Tickets' if amount > 1 else 'Ticket'}",
-        value="\n".join(visual_tickets),
-        inline=False
-    )
-    
-    embed.add_field(
-        name="Transaction Summary",
-        value=(
-            f"```diff\n"
-            f"- Spent: {total_cost} points\n"
-            f"+ Tickets: {amount}\n"
-            f"= Balance: {user_points[user_id]} points\n"
-            f"```"
-            f"🏦 Pot: {lottery_pot} points"
-        ),
-        inline=False
-    )
-    
-    await ctx.send(embed=embed)
-
-@bot.command(
-    name='buyticket',
-    help=f'Buy a lottery ticket with specific numbers ({LOTTERY_COST} points)',
-    usage="<num1> <num2> <num3> <num4> <num5> <powerball>"
-)
-async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, pb: int):
-    user_id = str(ctx.author.id)
-    ensure_user(user_id)
-    
-    # Validate numbers
-    main_numbers = {n1, n2, n3, n4, n5}
-    if len(main_numbers) != 5 or any(n not in MAIN_NUMBER_RANGE for n in main_numbers):
-        return await ctx.send("❌ Pick 5 unique numbers between 1-25")
-    if pb not in POWERBALL_RANGE:
-        return await ctx.send("❌ Powerball must be 1-10")
-    
-    # Charge points
-    if user_points[user_id] < LOTTERY_COST:
-        return await ctx.send(f"❌ You need {LOTTERY_COST} points (You have: {user_points[user_id]})")
-    
-    user_points[user_id] -= LOTTERY_COST
-    global lottery_pot
-    lottery_pot += LOTTERY_COST
-    
-    # Store ticket
-    ticket = {
-        'user': user_id,
-        'numbers': sorted(main_numbers),
-        'powerball': pb,
-        'time': datetime.now().isoformat()
-    }
-    lottery_history.append(ticket)
-    save_data()
-    
-    # Create bingo display for this ticket
-    def create_bingo_card(numbers, pb):
-        card = "```diff\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "| Main Numbers           | Powerball |\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        num_cells = "|"
-        for num in numbers:
-            num_cells += f" {str(num).center(3)} |"
-        num_cells += f" {f'PB{pb}'.center(3)} |"
-        card += num_cells + "\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "```"
-        return card
-    
-    embed = discord.Embed(
-        title="🎟️ Custom Ticket Purchased",
-        color=0x7289DA
-    )
-    embed.add_field(
-        name="Your Ticket",
-        value=create_bingo_card(sorted(main_numbers), pb),
-        inline=False
-    )
-    embed.add_field(
-        name="Transaction",
-        value=(
-            f"```diff\n"
-            f"- {LOTTERY_COST} points\n"
-            f"= Balance: {user_points[user_id]} points\n"
-            f"```"
-            f"🏦 Pot: {lottery_pot} points"
-        ),
-        inline=False
-    )
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='drawlottery', help='Run lottery draw (Admin only)')
 @admin_required()
 async def draw_lottery(ctx):
     global lottery_pot, lottery_history, lottery_winners
@@ -890,52 +954,11 @@ async def draw_lottery(ctx):
         embed.add_field(name="💎 Jackpot Rolls Over", value=f"New pot: {new_pot} points", inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name='lotterystats', help='Show historical lottery stats')
-async def lottery_stats(ctx):
-    if not lottery_winners:
-        return await ctx.send("No draws yet!")
-    
-    # Calculate frequency
-    main_counts = defaultdict(int)
-    pb_counts = defaultdict(int)
-    
-    for draw in lottery_winners:
-        for num in draw['main']:
-            main_counts[num] += 1
-        pb_counts[draw['powerball']] += 1
-    
-    # Top hot numbers
-    hot_main = sorted(main_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    hot_pb = sorted(pb_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-    
-    # Cold numbers (never or rarely drawn)
-    all_main = set(MAIN_NUMBER_RANGE)
-    drawn_main = set(main_counts.keys())
-    cold_main = sorted(all_main - drawn_main) or ["None"]
-    
-    embed = discord.Embed(
-        title="📊 Lottery Statistics",
-        description=f"Analyzing {len(lottery_winners)} past draws",
-        color=0x00FFFF
-    )
-    embed.add_field(
-        name="🔥 Hot Main Numbers",
-        value="\n".join(f"{num}: {count}x" for num, count in hot_main),
-        inline=True
-    )
-    embed.add_field(
-        name="❄️ Cold Main Numbers",
-        value=", ".join(map(str, cold_main[:5])),
-        inline=True
-    )
-    embed.add_field(
-        name="🔥 Hot Powerballs",
-        value="\n".join(f"{num}: {count}x" for num, count in hot_pb),
-        inline=False
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name='resetpot', help='Reset lottery pot to initial amount (Admin only)')
+@bot.command(
+    name='resetpot',
+    help='[ADMIN] Reset lottery pot to initial amount',
+    usage=""
+)
 @admin_required()
 async def reset_pot(ctx):
     global lottery_pot
