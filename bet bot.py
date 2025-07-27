@@ -46,25 +46,26 @@ DAILY_RESET_MINUTE = 0
 MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
-# Lottery settings (UPDATED RANGE: 1-25 instead of 1-30)
+# Lottery settings (updated with 1-25 range and odds)
 INITIAL_POT = 500
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
 MATCH5_PERCENT = 0.3
 MATCH4_PERCENT = 0.1
-MAIN_NUMBER_RANGE = range(1, 26)  # CHANGED FROM 30 TO 25
+MAIN_NUMBER_RANGE = range(1, 26)  # Changed from 30 to 25
 POWERBALL_RANGE = range(1, 11)
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
 - Starting Pot: {INITIAL_POT} points
 - Cost: {LOTTERY_COST} points per ticket
-- Pick 5 main numbers (1-25) + 1 Powerball (1-10)  # UPDATED RANGE
-- Jackpot: 60% of pot (minimum 100 points)
-- Match 5 main: 30% of pot
-- Match 4 main: 10% of pot
-- Powerball match: {POWERBALL_BONUS} points
-- Use `$quickticket` for random numbers
+- Pick 5 main numbers (1-25) + 1 Powerball (1-10)
+- Prize Structure:
+  🏆 JACKPOT (5+PB): 60% of pot • Odds: 1 in 531,300
+  💎 Match 5 (5 main): 30% of pot • Odds: 1 in 59,033
+  🔥 Match 4 (4 main): 10% of pot • Odds: 1 in 425
+  🎯 Powerball Only: {POWERBALL_BONUS} points • Odds: 1 in 10
+- Use `$quickticket [amount]` for random tickets
 """
 
 def get_example(command_name):
@@ -81,7 +82,7 @@ def get_example(command_name):
         "leaderboard": "",
         "activebets": "",
         "buyticket": "1 2 3 4 5 6",
-        "quickticket": "",
+        "quickticket": "3",
         "drawlottery": "",
         "lotteryrules": "",
         "lotterystats": "",
@@ -610,7 +611,7 @@ async def cancel_bet(ctx, bet_id: str):
     embed.add_field(name="Options", value=f"1) {bet['options'][0]}\n2) {bet['options'][1]}")
     await ctx.send(embed=embed)
 
-# Lottery system (UPDATED TO 1-25 MAIN NUMBERS)
+# Lottery system (updated with bingo-style display)
 @bot.command(name='lotteryrules', help='Show lottery rules and current pot')
 async def show_lottery_rules(ctx):
     embed = discord.Embed(
@@ -632,36 +633,108 @@ async def show_lottery_rules(ctx):
 
 @bot.command(
     name='quickticket',
-    help='Generate random lottery numbers'
+    help='Generate AND buy random lottery tickets',
+    usage="[amount=1]"
 )
-async def quick_pick(ctx):
-    main_numbers = sorted(random.sample(MAIN_NUMBER_RANGE, 5))  # UPDATED RANGE
-    powerball = random.choice(list(POWERBALL_RANGE))
+async def quick_pick(ctx, amount: int = 1):
+    user_id = str(ctx.author.id)
+    ensure_user(user_id)
     
+    if amount <= 0:
+        return await ctx.send("❌ Amount must be at least 1")
+    if amount > 5:
+        return await ctx.send("❌ Max 5 tickets at once (for clean formatting)")
+    
+    total_cost = LOTTERY_COST * amount
+    if user_points[user_id] < total_cost:
+        return await ctx.send(
+            f"❌ You need {total_cost} points for {amount} tickets "
+            f"(You have: {user_points[user_id]})"
+        )
+    
+    # Process purchase
+    user_points[user_id] -= total_cost
+    global lottery_pot
+    lottery_pot += total_cost
+    
+    # Generate tickets
+    tickets = []
+    for _ in range(amount):
+        main_numbers = sorted(random.sample(MAIN_NUMBER_RANGE, 5))
+        powerball = random.choice(list(POWERBALL_RANGE))
+        tickets.append((main_numbers, powerball))
+        lottery_history.append({
+            'user': user_id,
+            'numbers': main_numbers,
+            'powerball': powerball,
+            'time': datetime.now().isoformat()
+        })
+    
+    save_data()
+    
+    # Bingo-style display function
+    def create_bingo_card(numbers, pb):
+        card = "```diff\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "| Main Numbers           | Powerball |\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        num_cells = "|"
+        for num in numbers:
+            num_cells += f" {str(num).center(3)} |"
+        num_cells += f" {f'PB{pb}'.center(3)} |"
+        card += num_cells + "\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "```"
+        return card
+    
+    # Build visual tickets
+    visual_tickets = []
+    for i, (nums, pb) in enumerate(tickets):
+        visual_tickets.append(
+            f"**Ticket #{i+1}**\n"
+            f"{create_bingo_card(nums, pb)}"
+        )
+    
+    # Build embed
     embed = discord.Embed(
-        title="🎟️ Quick-Pick Numbers",
-        description=(
-            f"**Main Numbers:** {', '.join(map(str, main_numbers))}\n"
-            f"**Powerball:** {powerball}"
-        ),
-        color=0x7289DA
+        title=f"🎰 {'Tickets' if amount > 1 else 'Ticket'} Purchased",
+        color=0x00FF00 if amount > 1 else 0x7289DA
     )
-    embed.set_footer(text=f"Buy with: $buyticket {' '.join(map(str, main_numbers))} {powerball}")
+    
+    embed.add_field(
+        name=f"Your {'Tickets' if amount > 1 else 'Ticket'}",
+        value="\n".join(visual_tickets),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="Transaction Summary",
+        value=(
+            f"```diff\n"
+            f"- Spent: {total_cost} points\n"
+            f"+ Tickets: {amount}\n"
+            f"= Balance: {user_points[user_id]} points\n"
+            f"```"
+            f"🏦 Pot: {lottery_pot} points"
+        ),
+        inline=False
+    )
+    
     await ctx.send(embed=embed)
 
 @bot.command(
     name='buyticket',
-    help=f'Buy a lottery ticket ({LOTTERY_COST} points)',
+    help=f'Buy a lottery ticket with specific numbers ({LOTTERY_COST} points)',
     usage="<num1> <num2> <num3> <num4> <num5> <powerball>"
 )
 async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, pb: int):
     user_id = str(ctx.author.id)
     ensure_user(user_id)
     
-    # Validate numbers (UPDATED TO 1-25)
+    # Validate numbers
     main_numbers = {n1, n2, n3, n4, n5}
     if len(main_numbers) != 5 or any(n not in MAIN_NUMBER_RANGE for n in main_numbers):
-        return await ctx.send("❌ Pick 5 unique numbers between 1-25")  # UPDATED ERROR MESSAGE
+        return await ctx.send("❌ Pick 5 unique numbers between 1-25")
     if pb not in POWERBALL_RANGE:
         return await ctx.send("❌ Powerball must be 1-10")
     
@@ -683,11 +756,43 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
     lottery_history.append(ticket)
     save_data()
     
-    await ctx.send(
-        f"🎟️ {ctx.author.mention} bought ticket: "
-        f"**{', '.join(map(str, sorted(main_numbers)))}** + Powerball: {pb}\n"
-        f"Pot is now: **{lottery_pot} points**"
+    # Create bingo display for this ticket
+    def create_bingo_card(numbers, pb):
+        card = "```diff\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "| Main Numbers           | Powerball |\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        num_cells = "|"
+        for num in numbers:
+            num_cells += f" {str(num).center(3)} |"
+        num_cells += f" {f'PB{pb}'.center(3)} |"
+        card += num_cells + "\n"
+        card += "+-----+-----+-----+-----+-----+-----+\n"
+        card += "```"
+        return card
+    
+    embed = discord.Embed(
+        title="🎟️ Custom Ticket Purchased",
+        color=0x7289DA
     )
+    embed.add_field(
+        name="Your Ticket",
+        value=create_bingo_card(sorted(main_numbers), pb),
+        inline=False
+    )
+    embed.add_field(
+        name="Transaction",
+        value=(
+            f"```diff\n"
+            f"- {LOTTERY_COST} points\n"
+            f"= Balance: {user_points[user_id]} points\n"
+            f"```"
+            f"🏦 Pot: {lottery_pot} points"
+        ),
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
 
 @bot.command(name='drawlottery', help='Run lottery draw (Admin only)')
 @admin_required()
@@ -697,7 +802,7 @@ async def draw_lottery(ctx):
     if len(lottery_history) < 3:
         return await ctx.send("❌ Need at least 3 tickets to draw")
     
-    # Generate winning numbers (UPDATED TO 1-25)
+    # Generate winning numbers
     winning_main = sorted(random.sample(MAIN_NUMBER_RANGE, 5))
     winning_pb = random.choice(list(POWERBALL_RANGE))
     
@@ -804,7 +909,7 @@ async def lottery_stats(ctx):
     hot_pb = sorted(pb_counts.items(), key=lambda x: x[1], reverse=True)[:3]
     
     # Cold numbers (never or rarely drawn)
-    all_main = set(MAIN_NUMBER_RANGE)  # UPDATED RANGE
+    all_main = set(MAIN_NUMBER_RANGE)
     drawn_main = set(main_counts.keys())
     cold_main = sorted(all_main - drawn_main) or ["None"]
     
