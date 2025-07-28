@@ -727,8 +727,8 @@ async def quick_pick(ctx, amount: int = 1):
     
     if amount <= 0:
         return await ctx.send("❌ Amount must be at least 1")
-    if amount > 5:
-        return await ctx.send("❌ Max 5 tickets at once (for clean formatting)")
+    if amount > 20:
+        return await ctx.send("❌ Max 20 tickets at once")
     
     total_cost = LOTTERY_COST * amount
     if user_points[user_id] < total_cost:
@@ -757,39 +757,39 @@ async def quick_pick(ctx, amount: int = 1):
     
     save_data()
     
-    # Bingo-style display
-    def create_bingo_card(numbers, pb):
-        card = "```diff\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "| Main Numbers           | Powerball |\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        num_cells = "|"
-        for num in numbers:
-            num_cells += f" {str(num).center(3)} |"
-        num_cells += f" {f'PB{pb}'.center(3)} |"
-        card += num_cells + "\n"
-        card += "+-----+-----+-----+-----+-----+-----+\n"
-        card += "```"
-        return card
-    
-    visual_tickets = []
-    for i, (nums, pb) in enumerate(tickets):
-        visual_tickets.append(
-            f"**Ticket #{i+1}**\n"
-            f"{create_bingo_card(nums, pb)}"
+    # Format numbers with consistent spacing
+    formatted_tickets = []
+    for i, (nums, pb) in enumerate(tickets, 1):
+        # Format each number to 2 digits with leading space if needed
+        formatted_numbers = [f"{n:2d}" for n in nums]
+        formatted_tickets.append(
+            f"**Ticket #{i:2d}:** `{', '.join(formatted_numbers)}` + `PB: {pb:2d}`"
         )
     
     embed = discord.Embed(
-        title=f"🎰 {'Tickets' if amount > 1 else 'Ticket'} Purchased",
+        title=f"🎰 {'Tickets' if amount > 1 else 'Ticket'} Purchased ({amount})",
         color=0x00FF00 if amount > 1 else 0x7289DA
     )
     
-    embed.add_field(
-        name=f"Your {'Tickets' if amount > 1 else 'Ticket'}",
-        value="\n".join(visual_tickets),
-        inline=False
-    )
+    # Add tickets in aligned format
+    ticket_display = "\n".join(formatted_tickets)
+    if len(ticket_display) > 1024:
+        # Split into multiple fields if too long
+        chunks = [formatted_tickets[i:i+10] for i in range(0, len(formatted_tickets), 10)]
+        for i, chunk in enumerate(chunks, 1):
+            embed.add_field(
+                name=f"Tickets Part {i}",
+                value="\n".join(chunk),
+                inline=False
+            )
+    else:
+        embed.add_field(
+            name="Your Tickets",
+            value="\n".join(formatted_tickets),
+            inline=False
+        )
     
+    # Add transaction summary
     embed.add_field(
         name="Transaction Summary",
         value=(
