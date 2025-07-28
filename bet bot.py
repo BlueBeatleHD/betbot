@@ -34,11 +34,13 @@ last_message_time = {}
 voice_time_tracking = {}
 voice_start_times = {}
 voice_channel_points = defaultdict(int)
+next_voice_payout = {}  # New tracker for next payout time
 lottery_pot = 0
 lottery_history = []
 lottery_winners = []
 
 # Configuration
+OWNER_ROLE_NAME = "Bot Owner"
 ADMIN_ROLE_NAME = "Bot Admin"
 EASTERN = pytz.timezone('US/Eastern')
 DAILY_RESET_HOUR = 0  # 12 AM
@@ -47,7 +49,7 @@ MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
 # Lottery settings
-INITIAL_POT = 500
+INITIAL_POT = 15000
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
@@ -55,6 +57,13 @@ MATCH5_PERCENT = 0.3
 MATCH4_PERCENT = 0.1
 MAIN_NUMBER_RANGE = range(1, 26)
 POWERBALL_RANGE = range(1, 11)
+
+# Voice points settings
+VOICE_INTERVAL = 1800  # 30 minutes in seconds
+BASE_VOICE_POINTS = 15
+MIN_VOICE_POINTS = 3
+VOICE_SCALE_DOWN = 3  # Points reduced per hour
+
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
 - Starting Pot: {INITIAL_POT} points
@@ -71,34 +80,29 @@ TICKET_RULES = f"""
 def get_example(command_name):
     """Returns example usage for commands"""
     examples = {
-        # Points System
         "points": "",
         "daily": "",
         "voicepoints": "",
+        "voicestatus": "",
         "leaderboard": "",
-        
-        # Betting System
         "createbet": "WillItRain? Yes No 60",
         "placebet": "abc123 1 50",
         "activebets": "",
-        
-        # Lottery System
         "lotteryrules": "",
         "quickticket": "3",
         "buyticket": "1 2 3 4 5 6",
         "lotterystats": "",
-        
-        # Admin Commands
-        "givepoints": "@User 100",
+        "resetpot": "",
+        "drawlottery": "",
         "resolvebet": "abc123 1",
         "cancelbet": "abc123",
-        "drawlottery": "",
-        "resetpot": ""
+        "givepoints": "@User 100", 
+        "mytickets": "",
     }
     return examples.get(command_name, "")
 
 def load_data():
-    global user_points, active_bets, last_daily, last_message_time, voice_time_tracking, voice_channel_points, lottery_pot, lottery_history, lottery_winners
+    global user_points, active_bets, last_daily, last_message_time, voice_time_tracking, voice_channel_points, next_voice_payout, lottery_pot, lottery_history, lottery_winners
     try:
         with open('data.json', 'r') as f:
             data = json.load(f)
@@ -108,6 +112,7 @@ def load_data():
             last_message_time = data.get('last_message_time', {})
             voice_time_tracking = data.get('voice_time_tracking', {})
             voice_channel_points = defaultdict(int, data.get('voice_channel_points', {}))
+            next_voice_payout = data.get('next_voice_payout', {})
             lottery_pot = data.get('lottery_pot', INITIAL_POT)
             lottery_history = data.get('lottery_history', [])
             lottery_winners = data.get('lottery_winners', [])
@@ -118,6 +123,7 @@ def load_data():
         last_message_time = {}
         voice_time_tracking = {}
         voice_channel_points = defaultdict(int)
+        next_voice_payout = {}
         lottery_pot = INITIAL_POT
         lottery_history = []
         lottery_winners = []
@@ -132,6 +138,7 @@ def save_data():
             'last_message_time': last_message_time,
             'voice_time_tracking': voice_time_tracking,
             'voice_channel_points': dict(voice_channel_points),
+            'next_voice_payout': next_voice_payout,
             'lottery_pot': lottery_pot,
             'lottery_history': lottery_history,
             'lottery_winners': lottery_winners
@@ -146,11 +153,132 @@ def ensure_user(user_id):
 def is_admin(member):
     return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
 
+def is_owner(member):
+    return any(role.name == OWNER_ROLE_NAME for role in member.roles)
+
 def handle_shutdown():
     """Cleanup function for graceful shutdown"""
     logger.info("\n🛑 Shutting down bot gracefully...")
     save_data()
-    sys.exit(0)
+
+def admin_required():
+    async def predicate(ctx):
+        if not is_admin(ctx.author):
+            raise commands.CheckFailure()
+        return True
+    return commands.check(predicate)
+
+def owner_required():
+    async def predicate(ctx):
+        if not is_owner(ctx.author):
+            raise commands.CheckFailure()
+        return True
+    return commands.check(predicate)
+
+class CustomHelpCommand(commands.HelpCommand):
+    def __init__(self):
+        super().__init__(
+            command_attrs={
+                'help': 'Shows help information for commands',
+                'hidden': True
+            }
+        )
+    
+    async def send_bot_help(self, mapping):
+        embed = discord.Embed(
+            title="🎰 BetBot Command Categories",
+            description=f"Use `{self.context.prefix}help <command>` for more info",
+            color=discord.Color.blurple()
+        )
+        
+        # Points Commands
+        points_commands = [
+            f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
+            for cmd in bot.commands 
+            if cmd.name in ['points', 'daily', 'voicepoints', 'voicestatus', 'leaderboard']
+            and not cmd.hidden
+        ]
+        embed.add_field(
+            name="💰 Points System",
+            value="\n".join(points_commands) or "No commands",
+            inline=False
+        )
+        
+        # Betting Commands
+        betting_commands = [
+            f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
+            for cmd in bot.commands 
+            if cmd.name in ['createbet', 'placebet', 'activebets']
+            and not cmd.hidden
+        ]
+        embed.add_field(
+            name="🎲 Betting System",
+            value="\n".join(betting_commands) or "No commands",
+            inline=False
+        )
+        
+        # Lottery Commands
+        lottery_commands = [
+            f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
+            for cmd in bot.commands 
+            if cmd.name in ['lotteryrules', 'quickticket', 'buyticket', 'lotterystats', 'mytickets']
+            and not cmd.hidden
+        ]
+        embed.add_field(
+            name="🎰 Lottery System",
+            value="\n".join(lottery_commands) or "No commands",
+            inline=False
+        )
+        
+        # Admin Commands
+        admin_commands = [
+            f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
+            for cmd in bot.commands 
+            if cmd.name in ['resetpot', 'drawlottery', 'resolvebet', 'cancelbet']
+            and not cmd.hidden
+        ]
+        if admin_commands:
+            embed.add_field(
+                name="⚙️ Admin Commands",
+                value="\n".join(admin_commands),
+                inline=False
+            )
+        
+        # Owner Commands
+        owner_commands = [
+            f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
+            for cmd in bot.commands 
+            if cmd.name in ['givepoints']
+            and not cmd.hidden
+        ]
+        if owner_commands:
+            embed.add_field(
+                name="🛡️ Owner Commands",
+                value="\n".join(owner_commands),
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Type {self.context.prefix}help <command> for more details")
+        await self.get_destination().send(embed=embed)
+    
+    async def send_command_help(self, command):
+        embed = discord.Embed(
+            title=f"Command: {command.name}",
+            description=command.help,
+            color=discord.Color.green()
+        )
+        embed.add_field(
+            name="Usage",
+            value=f"```{self.context.prefix}{command.name} {command.signature}```",
+            inline=False
+        )
+        if get_example(command.name):
+            embed.add_field(
+                name="Example",
+                value=f"```{self.context.prefix}{get_example(command.name)}```",
+                inline=False
+            )
+        await self.get_destination().send(embed=embed)
 
 class RobustBot(commands.Bot):
     def __init__(self, *args, **kwargs):
@@ -166,9 +294,10 @@ class RobustBot(commands.Bot):
             now = datetime.now(EASTERN)
             logger.info(f"{now.strftime('%Y-%m-%d %H:%M:%S')} ET: ✅ Daily rewards reset")
 
-        @tasks.loop(minutes=5)
+        @tasks.loop(minutes=30)
         async def voice_points_update():
-            await self.check_voice_time()
+            await check_voice_time()
+            logger.info("Voice points check completed at %s", datetime.now(EASTERN))
 
         @daily_reset.error
         async def daily_reset_error(error):
@@ -185,33 +314,6 @@ class RobustBot(commands.Bot):
         self.daily_reset = daily_reset
         self.voice_points_update = voice_points_update
 
-    async def check_voice_time(self):
-        now = datetime.now()
-        users_to_remove = []
-        
-        for user_id, start_time in voice_start_times.items():
-            time_spent = (now - start_time).total_seconds()
-            
-            if time_spent >= 300:  # 5 minutes in seconds
-                voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
-                voice_start_times[user_id] = now
-                
-                total_hours = voice_time_tracking.get(user_id, 0) / 3600
-                hours_floor = int(total_hours)
-                points_to_add = max(3, 15 - (3 * min(4, hours_floor)))
-                
-                voice_channel_points[user_id] = voice_channel_points.get(user_id, 0) + points_to_add
-                ensure_user(user_id)
-                user_points[user_id] += points_to_add
-                voice_time_tracking[user_id] = 0
-        
-        save_data()
-
-    async def on_shutdown(self):
-        """Handle graceful shutdown"""
-        await self.close()
-        handle_shutdown()
-
     async def on_ready(self):
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         logger.info('------')
@@ -219,6 +321,54 @@ class RobustBot(commands.Bot):
             self.daily_reset.start()
         if not self.voice_points_update.is_running():
             self.voice_points_update.start()
+
+    async def on_shutdown(self):
+        """Handle graceful shutdown"""
+        logger.info("Starting graceful shutdown...")
+        # Stop all tasks
+        if hasattr(self, 'daily_reset') and self.daily_reset.is_running():
+            self.daily_reset.cancel()
+        if hasattr(self, 'voice_points_update') and self.voice_points_update.is_running():
+            self.voice_points_update.cancel()
+    
+        # Close the bot connection
+        await self.close()
+        handle_shutdown()
+
+async def check_voice_time():
+    now = datetime.now(EASTERN)
+    
+    for user_id, start_time in list(voice_start_times.items()):
+        try:
+            if user_id not in next_voice_payout:
+                next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+                continue
+                
+            payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
+            
+            if now >= payout_time:
+                # Calculate points
+                total_hours = (voice_time_tracking.get(user_id, 0) + (now - start_time).total_seconds()) / 3600
+                hours_floor = int(total_hours)
+                points = max(MIN_VOICE_POINTS, 
+                            BASE_VOICE_POINTS - (VOICE_SCALE_DOWN * hours_floor))
+                
+                # Update tracking
+                voice_time_tracking[user_id] = 0
+                voice_channel_points[user_id] = voice_channel_points.get(user_id, 0) + points
+                ensure_user(user_id)
+                user_points[user_id] += points
+                
+                # Reset timer
+                voice_start_times[user_id] = now
+                next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+                
+                logger.info(f"Awarded {points} points to {user_id} for voice time")
+                
+        except Exception as e:
+            logger.error(f"Error processing voice time for {user_id}: {e}")
+    
+    save_data()
 
 # Initialize bot
 intents = discord.Intents.default()
@@ -230,7 +380,8 @@ bot = RobustBot(
     command_prefix='$',
     intents=intents,
     reconnect=True,
-    heartbeat_timeout=60.0
+    heartbeat_timeout=60.0,
+    help_command=CustomHelpCommand()
 )
 
 @bot.event
@@ -253,7 +404,10 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ You don't have permission to use this command.")
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send(f"❌ You need the '{ADMIN_ROLE_NAME}' role to use this command.")
+        if is_admin(ctx.author):
+            await ctx.send(f"❌ You need the '{OWNER_ROLE_NAME}' role to use this command.")
+        else:
+            await ctx.send(f"❌ You need the '{ADMIN_ROLE_NAME}' role to use this command.")
     elif isinstance(error, commands.BadArgument):
         await ctx.send(f"❌ Invalid argument: {error}")
     else:
@@ -279,48 +433,98 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
-# Voice state tracking
 @bot.event
 async def on_voice_state_update(member, before, after):
     user_id = str(member.id)
-    now = datetime.now()
+    now = datetime.now(EASTERN)
     
-    if before.channel != after.channel:
-        if before.channel and user_id in voice_start_times:
+    # User left voice channel or was disconnected
+    if before.channel and not after.channel:
+        if user_id in voice_start_times:
             time_spent = (now - voice_start_times[user_id]).total_seconds()
-            if not before.self_deaf:
-                voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
+            voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
             del voice_start_times[user_id]
-        
-        if after.channel and not after.self_deaf:
-            voice_start_times[user_id] = now
+            if user_id in next_voice_payout:
+                del next_voice_payout[user_id]
     
-    elif after.channel and (before.self_deaf != after.self_deaf):
-        if after.self_deaf:
-            if user_id in voice_start_times:
-                time_spent = (now - voice_start_times[user_id]).total_seconds()
-                voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
-                del voice_start_times[user_id]
-        else:
-            voice_start_times[user_id] = now
+    # User joined voice channel
+    elif after.channel and not before.channel:
+        voice_start_times[user_id] = now
+        next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+    
+    # User moved between channels
+    elif before.channel and after.channel and before.channel != after.channel:
+        if user_id in voice_start_times:
+            time_spent = (now - voice_start_times[user_id]).total_seconds()
+            voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
+        voice_start_times[user_id] = now
+        next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+    
+    # User deafened/undeafened
+    elif before.channel and after.channel and before.channel == after.channel:
+        if before.self_deaf != after.self_deaf:
+            if after.self_deaf:  # User deafened
+                if user_id in voice_start_times:
+                    time_spent = (now - voice_start_times[user_id]).total_seconds()
+                    voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
+                    del voice_start_times[user_id]
+                    if user_id in next_voice_payout:
+                        del next_voice_payout[user_id]
+            else:  # User undeafened
+                voice_start_times[user_id] = now
+                next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+    
+    save_data()
 
-# ======================
-# POINTS SYSTEM COMMANDS
-# ======================
-@bot.command(name='points', help='Check your points balance')
+@bot.command(name='voicestatus', help='💰 Check your voice points status and next payout time')
+async def voice_status(ctx):
+    user_id = str(ctx.author.id)
+    points = voice_channel_points.get(user_id, 0)
+    now = datetime.now(EASTERN)
+    
+    status_msg = "🔴 Not currently in a voice channel"
+    current_rate = BASE_VOICE_POINTS
+    
+    if user_id in next_voice_payout:
+        payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
+        time_left = payout_time - now
+        minutes_left = max(0, int(time_left.total_seconds() / 60))
+        status_msg = f"⏳ Next payout in ~{minutes_left} minutes"
+        
+        if user_id in voice_time_tracking:
+            total_hours = voice_time_tracking.get(user_id, 0) / 3600
+            if user_id in voice_start_times:
+                total_hours += (now - voice_start_times[user_id]).total_seconds() / 3600
+            hours_floor = int(total_hours)
+            current_rate = max(MIN_VOICE_POINTS, BASE_VOICE_POINTS - (VOICE_SCALE_DOWN * hours_floor))
+    
+    embed = discord.Embed(
+        title="🎧 Voice Points Status",
+        description=f"{ctx.author.mention}'s voice activity",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Total Earned", value=f"{points} points", inline=True)
+    embed.add_field(name="Status", value=status_msg, inline=True)
+    embed.add_field(
+        name="Current Rate",
+        value=f"Earning {current_rate} points per {VOICE_INTERVAL//60} minutes",
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+            
+# Points System Commands
+@bot.command(
+    name='points',
+    help='💰 Check your points balance'
+)
 async def check_points(ctx):
     points = ensure_user(ctx.author.id)
     await ctx.send(f'{ctx.author.mention}, you have {points} points.')
 
-@bot.command(name='voicepoints', help='Check your voice chat points balance')
-async def check_voice_points(ctx):
-    user_id = str(ctx.author.id)
-    points = voice_channel_points.get(user_id, 0)
-    await ctx.send(f'{ctx.author.mention}, you have earned {points} points from voice chat.')
-
 @bot.command(
     name='daily',
-    help='Claim your daily points (100-150 points)'
+    help='💰 Claim your daily points (100-150 points)'
 )
 async def daily_points(ctx):
     user_id = str(ctx.author.id)
@@ -347,8 +551,17 @@ async def daily_points(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(
+    name='voicepoints',
+    help='💰 Check your voice chat points balance'
+)
+async def check_voice_points(ctx):
+    user_id = str(ctx.author.id)
+    points = voice_channel_points.get(user_id, 0)
+    await ctx.send(f'{ctx.author.mention}, you have earned {points} points from voice chat.')
+
+@bot.command(
     name='leaderboard',
-    help='Show top 10 users by points'
+    help='💰 Show top 10 users by points'
 )
 async def show_leaderboard(ctx):
     sorted_users = sorted(user_points.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -368,12 +581,10 @@ async def show_leaderboard(ctx):
     
     await ctx.send(embed=embed)
 
-# ======================
-# BETTING SYSTEM COMMANDS
-# ======================
+# Betting System Commands
 @bot.command(
     name='createbet',
-    help='Create a new betting event',
+    help='🎲 Create a new betting event',
     usage="<name> <option1> <option2> [duration_minutes=5]"
 )
 async def create_bet(ctx, name: str, option1: str, option2: str, duration_minutes: int = 5):
@@ -414,7 +625,7 @@ async def create_bet(ctx, name: str, option1: str, option2: str, duration_minute
 
 @bot.command(
     name='placebet',
-    help='Place a bet on an event',
+    help='🎲 Place a bet on an event',
     usage="<bet_id> <option_number> <amount>"
 )
 async def place_bet(ctx, bet_id: str, option_number: int, amount: int):
@@ -453,7 +664,7 @@ async def place_bet(ctx, bet_id: str, option_number: int, amount: int):
 
 @bot.command(
     name='activebets',
-    help='Show all active betting events'
+    help='🎲 Show all active betting events'
 )
 async def show_active_bets(ctx):
     if not active_bets:
@@ -482,10 +693,11 @@ async def show_active_bets(ctx):
     
     await ctx.send(embed=embed)
 
-# ======================
-# LOTTERY SYSTEM COMMANDS
-# ======================
-@bot.command(name='lotteryrules', help='Show lottery rules and current pot')
+# Lottery System Commands
+@bot.command(
+    name='lotteryrules',
+    help='🎰 Show lottery rules and current pot'
+)
 async def show_lottery_rules(ctx):
     embed = discord.Embed(
         title="🎰 Lottery Information",
@@ -506,7 +718,7 @@ async def show_lottery_rules(ctx):
 
 @bot.command(
     name='quickticket',
-    help='Generate AND buy random lottery tickets',
+    help='🎰 Generate AND buy random lottery tickets',
     usage="[amount=1]"
 )
 async def quick_pick(ctx, amount: int = 1):
@@ -595,7 +807,7 @@ async def quick_pick(ctx, amount: int = 1):
 
 @bot.command(
     name='buyticket',
-    help='Buy lottery ticket with specific numbers',
+    help='🎰 Buy lottery ticket with specific numbers',
     usage="<num1> <num2> <num3> <num4> <num5> <powerball>"
 )
 async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, pb: int):
@@ -664,8 +876,121 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
     )
     
     await ctx.send(embed=embed)
+    
+@bot.command(
+    name='mytickets',
+    help='🎰 View your lottery tickets with perfect alignment',
+    usage=""
+)
+async def view_my_tickets(ctx):
+    user_id = str(ctx.author.id)
+    user_tickets = sorted(
+        [t for t in lottery_history if t['user'] == user_id],
+        key=lambda x: x['time'],
+        reverse=True
+    )
+    
+    if not user_tickets:
+        return await ctx.send("You haven't purchased any tickets yet!")
 
-@bot.command(name='lotterystats', help='Show historical lottery stats')
+    def create_bingo_card(numbers, pb, index=None, purchase_time=None):
+        card = [
+            "```diff",
+            "+-------+-------+-------+-------+-------+---------+",
+        ]
+        
+        if index is not None and purchase_time is not None:
+            header = f" Ticket #{index+1} - {purchase_time} "
+            card.append(f"|{header.center(47)} |")
+            card.append("+-------+-------+-------+-------+-------+---------+")
+        
+        card.extend([
+            "| Main Numbers                        | Powerball |",
+            "+-------+-------+-------+-------+-------+---------+",
+            f"|  {str(numbers[0]).center(3)}  |  {str(numbers[1]).center(3)}  |  {str(numbers[2]).center(3)}  |  {str(numbers[3]).center(3)}  |  {str(numbers[4]).center(3)}  |    {str(pb).center(3)}  |",
+            "+-------+-------+-------+-------+-------+---------+",
+            "```"
+        ])
+        
+        return "\n".join(card)
+
+    # Pagination and display logic would go here
+    # [Same as previous examples]
+
+    # Create pages with 3 tickets each
+    tickets_per_page = 3
+    pages = []
+    
+    for i in range(0, len(user_tickets), tickets_per_page):
+        embed = discord.Embed(
+            title=f"🎟 Your Lottery Tickets ({len(user_tickets)} total)",
+            color=discord.Color.gold()
+        )
+        
+        page_tickets = user_tickets[i:i+tickets_per_page]
+        visual_display = []
+        
+        for j, ticket in enumerate(page_tickets, 1):
+            purchase_time = datetime.fromisoformat(ticket['time']).strftime('%m/%d %I:%M %p')
+            visual_display.append(
+                create_bingo_card(
+                    ticket['numbers'],
+                    ticket['powerball'],
+                    index=i+j-1,
+                    purchase_time=purchase_time
+                )
+            )
+        
+        embed.description = "\n".join(visual_display)
+        embed.set_footer(text=f"Page {i//tickets_per_page + 1}/{(len(user_tickets)-1)//tickets_per_page + 1}")
+        pages.append(embed)
+    
+    # Send first page with pagination controls
+    if len(pages) == 1:
+        return await ctx.send(embed=pages[0])
+    
+    message = await ctx.send(embed=pages[0])
+    
+    # Add reactions for navigation
+    for emoji in ["⬅️", "➡️", "❌"]:
+        await message.add_reaction(emoji)
+    
+    # Pagination logic
+    def check(reaction, user):
+        return user == ctx.author and reaction.message.id == message.id and str(reaction.emoji) in ["⬅️", "➡️", "❌"]
+    
+    current_page = 0
+    
+    while True:
+        try:
+            reaction, user = await bot.wait_for("reaction_add", timeout=60.0, check=check)
+            
+            if str(reaction.emoji) == "➡️" and current_page < len(pages) - 1:
+                current_page += 1
+                await message.edit(embed=pages[current_page])
+            elif str(reaction.emoji) == "⬅️" and current_page > 0:
+                current_page -= 1
+                await message.edit(embed=pages[current_page])
+            elif str(reaction.emoji) == "❌":
+                await message.delete()
+                return
+            
+            try:
+                await message.remove_reaction(reaction, user)
+            except:
+                pass
+                
+        except asyncio.TimeoutError:
+            try:
+                await message.clear_reactions()
+            except:
+                pass
+            break
+
+@bot.command(
+    name='lotterystats',
+    help='🎰 Show historical lottery stats'
+)
 async def lottery_stats(ctx):
     if not lottery_winners:
         return await ctx.send("No draws yet!")
@@ -710,22 +1035,13 @@ async def lottery_stats(ctx):
     )
     await ctx.send(embed=embed)
 
-# ======================
-# ADMIN COMMANDS
-# ======================
-def admin_required():
-    async def predicate(ctx):
-        if not is_admin(ctx.author):
-            raise commands.CheckFailure()
-        return True
-    return commands.check(predicate)
-
+## Owner Commands
 @bot.command(
     name='givepoints',
-    help='[OWNER] Give points to a user (Bot Owner Only)',
+    help='🛡️ [OWNER] Give points to a user',
     usage="<user> <amount>"
 )
-@commands.is_owner()
+@owner_required()
 async def give_points(ctx, user: discord.Member, amount: int):
     try:
         if user.bot:
@@ -749,114 +1065,42 @@ async def give_points(ctx, user: discord.Member, amount: int):
 
     except commands.BadArgument as e:
         await ctx.send(f"❌ {e}", delete_after=15)
-    except commands.NotOwner:
-        await ctx.send("❌ This command can only be used by the bot owner!", delete_after=10)
 
 @bot.command(
-    name='resolvebet',
-    help='[ADMIN] Resolve a betting event',
-    usage="<bet_id> <winning_option_number>"
+    name='shutdown',
+    help='🛑 [OWNER] Shutdown the bot gracefully',
+    hidden=True
 )
-@admin_required()
-async def resolve_bet(ctx, bet_id: str, winning_option_number: int):
-    if bet_id not in active_bets:
-        return await ctx.send("❌ Invalid bet ID.")
-    
-    bet = active_bets[bet_id]
-    
-    if bet['resolved']:
-        return await ctx.send("❌ This bet has already been resolved.")
-    
-    if winning_option_number not in [1, 2]:
-        return await ctx.send("❌ Please choose winning option 1 or 2.")
-    
-    winning_option = bet['options'][winning_option_number - 1]
-    losing_option = bet['options'][0] if winning_option_number == 2 else bet['options'][1]
-    
-    total_winning = sum(bet['bets'][winning_option].values())
-    total_losing = sum(bet['bets'][losing_option].values())
-    
+@owner_required()
+async def shutdown_bot(ctx):
+    """Gracefully shuts down the bot"""
     embed = discord.Embed(
-        title=f"🏆 Bet Resolved: {bet['name']}",
-        description=f"Winning option: {winning_option}",
-        color=discord.Color.gold()
+        title="🛑 Bot Shutdown",
+        description="Shutting down the bot gracefully...",
+        color=discord.Color.red()
     )
-    
-    if total_winning == 0:
-        for option in bet['options']:
-            for user_id, amount in bet['bets'][option].items():
-                user_points[user_id] += amount
-        
-        embed.description = "No winners - all bets returned"
-        await ctx.send(embed=embed)
-    else:
-        winners = []
-        for user_id, amount in bet['bets'][winning_option].items():
-            winnings = amount + (amount / total_winning) * total_losing
-            user_points[user_id] += int(winnings)
-            winners.append((user_id, amount, int(winnings)))
-        
-        bet['resolved'] = True
-        save_data()
-        
-        winner_text = []
-        for user_id, bet_amount, winnings in sorted(winners, key=lambda x: x[1], reverse=True)[:5]:
-            user = await bot.fetch_user(int(user_id))
-            winner_text.append(f"{user.name}: +{winnings - bet_amount} (total {winnings})")
-        
-        embed.add_field(
-            name="Top Winners",
-            value="\n".join(winner_text) if winner_text else "No winners",
-            inline=False
-        )
-        embed.add_field(
-            name="Payout Details",
-            value=f"Total pot: {total_winning + total_losing}\nWinners share: {total_losing}",
-            inline=False
-        )
-        await ctx.send(embed=embed)
-
-@bot.command(
-    name='cancelbet',
-    help='[ADMIN] Cancel an active bet',
-    usage="<bet_id>"
-)
-@admin_required()
-async def cancel_bet(ctx, bet_id: str):
-    if bet_id not in active_bets:
-        return await ctx.send("❌ Invalid bet ID. Use `$activebets` to see current bets.")
-    
-    bet = active_bets[bet_id]
-    
-    if bet['resolved']:
-        return await ctx.send("❌ This bet was already resolved.")
-    
-    if datetime.fromisoformat(bet['end_time']) < datetime.now():
-        return await ctx.send("❌ This bet has already ended (use `$resolvebet` instead).")
-
-    # Refund all bets
-    refunds = 0
-    for option in bet['options']:
-        for user_id, amount in bet['bets'][option].items():
-            user_points[user_id] += amount
-            refunds += amount
-    
-    # Mark as resolved and save
-    bet['resolved'] = True
-    save_data()
-    
-    embed = discord.Embed(
-        title="❌ Bet Cancelled",
-        description=f"All {refunds} points have been refunded.",
-        color=discord.Color.orange()
-    )
-    embed.add_field(name="Bet Name", value=bet['name'])
-    embed.add_field(name="Options", value=f"1) {bet['options'][0]}\n2) {bet['options'][1]}")
     await ctx.send(embed=embed)
+    logger.info(f"Shutdown command received from {ctx.author}")
+    
+    # Create a new task to avoid blocking
+    asyncio.create_task(bot.on_shutdown())
+
+# Admin Commands
+@bot.command(
+    name='resetpot',
+    help='⚙️ [ADMIN] Reset lottery pot to initial amount',
+    usage=""
+)
+@admin_required()
+async def reset_pot(ctx):
+    global lottery_pot
+    lottery_pot = INITIAL_POT
+    save_data()
+    await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
 
 @bot.command(
     name='drawlottery',
-    help='[ADMIN] Run lottery draw',
+    help='⚙️ [ADMIN] Run lottery draw',
     usage=""
 )
 @admin_required()
@@ -955,18 +1199,107 @@ async def draw_lottery(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(
-    name='resetpot',
-    help='[ADMIN] Reset lottery pot to initial amount',
-    usage=""
+    name='resolvebet',
+    help='⚙️ [ADMIN] Resolve a betting event',
+    usage="<bet_id> <winning_option_number>"
 )
 @admin_required()
-async def reset_pot(ctx):
-    global lottery_pot
-    lottery_pot = INITIAL_POT
-    save_data()
-    await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
+async def resolve_bet(ctx, bet_id: str, winning_option_number: int):
+    if bet_id not in active_bets:
+        return await ctx.send("❌ Invalid bet ID.")
+    
+    bet = active_bets[bet_id]
+    
+    if bet['resolved']:
+        return await ctx.send("❌ This bet has already been resolved.")
+    
+    if winning_option_number not in [1, 2]:
+        return await ctx.send("❌ Please choose winning option 1 or 2.")
+    
+    winning_option = bet['options'][winning_option_number - 1]
+    losing_option = bet['options'][0] if winning_option_number == 2 else bet['options'][1]
+    
+    total_winning = sum(bet['bets'][winning_option].values())
+    total_losing = sum(bet['bets'][losing_option].values())
+    
+    embed = discord.Embed(
+        title=f"🏆 Bet Resolved: {bet['name']}",
+        description=f"Winning option: {winning_option}",
+        color=discord.Color.gold()
+    )
+    
+    if total_winning == 0:
+        for option in bet['options']:
+            for user_id, amount in bet['bets'][option].items():
+                user_points[user_id] += amount
+        
+        embed.description = "No winners - all bets returned"
+        await ctx.send(embed=embed)
+    else:
+        winners = []
+        for user_id, amount in bet['bets'][winning_option].items():
+            winnings = amount + (amount / total_winning) * total_losing
+            user_points[user_id] += int(winnings)
+            winners.append((user_id, amount, int(winnings)))
+        
+        bet['resolved'] = True
+        save_data()
+        
+        winner_text = []
+        for user_id, bet_amount, winnings in sorted(winners, key=lambda x: x[1], reverse=True)[:5]:
+            user = await bot.fetch_user(int(user_id))
+            winner_text.append(f"{user.name}: +{winnings - bet_amount} (total {winnings})")
+        
+        embed.add_field(
+            name="Top Winners",
+            value="\n".join(winner_text) if winner_text else "No winners",
+            inline=False
+        )
+        embed.add_field(
+            name="Payout Details",
+            value=f"Total pot: {total_winning + total_losing}\nWinners share: {total_losing}",
+            inline=False
+        )
+        await ctx.send(embed=embed)
 
-# Start the bot
+@bot.command(
+    name='cancelbet',
+    help='⚙️ [ADMIN] Cancel an active bet',
+    usage="<bet_id>"
+)
+@admin_required()
+async def cancel_bet(ctx, bet_id: str):
+    if bet_id not in active_bets:
+        return await ctx.send("❌ Invalid bet ID. Use `$activebets` to see current bets.")
+    
+    bet = active_bets[bet_id]
+    
+    if bet['resolved']:
+        return await ctx.send("❌ This bet was already resolved.")
+    
+    if datetime.fromisoformat(bet['end_time']) < datetime.now():
+        return await ctx.send("❌ This bet has already ended (use `$resolvebet` instead).")
+
+    # Refund all bets
+    refunds = 0
+    for option in bet['options']:
+        for user_id, amount in bet['bets'][option].items():
+            user_points[user_id] += amount
+            refunds += amount
+    
+    # Mark as resolved and save
+    bet['resolved'] = True
+    save_data()
+    
+    embed = discord.Embed(
+        title="❌ Bet Cancelled",
+        description=f"All {refunds} points have been refunded.",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Bet Name", value=bet['name'])
+    embed.add_field(name="Options", value=f"1) {bet['options'][0]}\n2) {bet['options'][1]}")
+    await ctx.send(embed=embed)
+
 if __name__ == "__main__":
     try:
         load_data()
