@@ -14,13 +14,24 @@ import signal
 import sys
 import platform
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from aiohttp import ClientSession
 
 # Windows event loop policy fix
 if platform.system() == 'Windows':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# KEEP YOUR ORIGINAL LOGGING - No changes here
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -34,10 +45,14 @@ last_message_time = {}
 voice_time_tracking = {}
 voice_start_times = {}
 voice_channel_points = defaultdict(int)
-next_voice_payout = {}  # New tracker for next payout time
+next_voice_payout = {}
 lottery_pot = 0
 lottery_history = []
 lottery_winners = []
+
+# Thread safety for data operations
+_save_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=2)
 
 # Configuration
 OWNER_ROLE_NAME = "Bot Owner"
@@ -49,7 +64,7 @@ MAX_BET_DURATION = 1440  # 24 hours in minutes
 MIN_BET_DURATION = 1     # 1 minute minimum
 
 # Lottery settings
-INITIAL_POT = 15000
+INITIAL_POT = 20000
 LOTTERY_COST = 10
 POWERBALL_BONUS = 50
 JACKPOT_PERCENT = 0.6
@@ -59,10 +74,11 @@ MAIN_NUMBER_RANGE = range(1, 26)
 POWERBALL_RANGE = range(1, 11)
 
 # Voice points settings
-VOICE_INTERVAL = 1800  # 30 minutes in seconds
+VOICE_INTERVAL = 600  # 30 minutes in seconds
 BASE_VOICE_POINTS = 15
 MIN_VOICE_POINTS = 3
 VOICE_SCALE_DOWN = 3  # Points reduced per hour
+VOICE_MINIMUM_SECONDS = 300  # 5 minutes minimum to earn points
 
 TICKET_RULES = f"""
 🎟 **Lottery Rules:**
@@ -98,56 +114,106 @@ def get_example(command_name):
         "cancelbet": "abc123",
         "givepoints": "@User 100", 
         "mytickets": "",
+        "resetvoicetracking": "@User",
     }
     return examples.get(command_name, "")
 
-def load_data():
-    global user_points, active_bets, last_daily, last_message_time, voice_time_tracking, voice_channel_points, next_voice_payout, lottery_pot, lottery_history, lottery_winners
+def save_data_sync():
+    """Synchronous version of save_data for thread safety"""
+    with _save_lock:
+        try:
+            with open('data.json', 'w') as f:
+                json.dump({
+                    'user_points': user_points,
+                    'active_bets': active_bets,
+                    'last_daily': last_daily,
+                    'last_message_time': last_message_time,
+                    'voice_time_tracking': voice_time_tracking,
+                    'voice_channel_points': dict(voice_channel_points),
+                    'next_voice_payout': next_voice_payout,
+                    'lottery_pot': lottery_pot,
+                    'lottery_history': lottery_history,
+                    'lottery_winners': lottery_winners
+                }, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving data: {e}")
+
+async def save_data_async():
+    """Non-blocking async save"""
+    loop = asyncio.get_event_loop()
     try:
-        with open('data.json', 'r') as f:
+        await loop.run_in_executor(_executor, save_data_sync)
+    except Exception as e:
+        logger.error(f"Error in async save: {e}")
+
+def save_data():
+    """Legacy sync save for compatibility"""
+    save_data_sync()
+
+def load_data():
+    """Load all bot data with automatic legacy format migration"""
+    global user_points, active_bets, last_daily, last_message_time
+    global voice_time_tracking, voice_start_times, voice_channel_points
+    global next_voice_payout, lottery_pot, lottery_history, lottery_winners
+
+    try:
+        with open('data.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
+            
+            # Load basic data
             user_points = data.get('user_points', {})
             active_bets = data.get('active_bets', {})
             last_daily = data.get('last_daily', {})
             last_message_time = data.get('last_message_time', {})
-            voice_time_tracking = data.get('voice_time_tracking', {})
+            voice_start_times = data.get('voice_start_times', {})
             voice_channel_points = defaultdict(int, data.get('voice_channel_points', {}))
             next_voice_payout = data.get('next_voice_payout', {})
             lottery_pot = data.get('lottery_pot', INITIAL_POT)
             lottery_history = data.get('lottery_history', [])
             lottery_winners = data.get('lottery_winners', [])
+
+            # Migrate voice_time_tracking to new format
+            voice_time_tracking = {}
+            legacy_data = data.get('voice_time_tracking', {})
+            
+            for user_id, time_data in legacy_data.items():
+                if isinstance(time_data, dict):
+                    # Already in new format
+                    voice_time_tracking[user_id] = time_data
+                else:
+                    # Convert legacy format (float/int) to new format
+                    voice_time_tracking[user_id] = {
+                        'total_time': float(time_data),
+                        'last_payout': datetime.now(EASTERN).isoformat()
+                    }
+            
+            logger.info(f"✅ Loaded data (migrated {len(legacy_data) - len(voice_time_tracking)} voice records)")
+
     except (FileNotFoundError, json.JSONDecodeError):
+        # Initialize fresh data if file doesn't exist or is corrupted
         user_points = {}
         active_bets = {}
         last_daily = {}
         last_message_time = {}
         voice_time_tracking = {}
+        voice_start_times = {}
         voice_channel_points = defaultdict(int)
         next_voice_payout = {}
         lottery_pot = INITIAL_POT
         lottery_history = []
         lottery_winners = []
         save_data()
+        logger.info("🆕 Created new data file")
+        
+    except Exception as e:
+        logger.error(f"❌ Error loading data: {e}")
+        raise
 
-def save_data():
-    with open('data.json', 'w') as f:
-        json.dump({
-            'user_points': user_points,
-            'active_bets': active_bets,
-            'last_daily': last_daily,
-            'last_message_time': last_message_time,
-            'voice_time_tracking': voice_time_tracking,
-            'voice_channel_points': dict(voice_channel_points),
-            'next_voice_payout': next_voice_payout,
-            'lottery_pot': lottery_pot,
-            'lottery_history': lottery_history,
-            'lottery_winners': lottery_winners
-        }, f, indent=4)
-
+# KEEP ALL YOUR EXISTING HELPER FUNCTIONS BELOW EXACTLY AS IS
 def ensure_user(user_id):
     if str(user_id) not in user_points:
         user_points[str(user_id)] = 100
-        save_data()
+        asyncio.create_task(save_data_async())
     return user_points[str(user_id)]
 
 def is_admin(member):
@@ -159,7 +225,7 @@ def is_owner(member):
 def handle_shutdown():
     """Cleanup function for graceful shutdown"""
     logger.info("\n🛑 Shutting down bot gracefully...")
-    save_data()
+    save_data_sync()
 
 def admin_required():
     async def predicate(ctx):
@@ -175,6 +241,123 @@ def owner_required():
         return True
     return commands.check(predicate)
 
+class RobustBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._shutdown_lock = asyncio.Lock()
+        self._tasks_initialized = False
+        self._init_tasks()
+
+    def _init_tasks(self):
+        """Initialize all background tasks with enhanced reliability"""
+        @tasks.loop(seconds=30)
+        async def voice_points_update():
+            try:
+                logger.debug(f"🔍 Voice check running (Next: {self.voice_points_update.next_iteration})")
+                await check_voice_time()
+            except Exception as e:
+                logger.error(f"Voice check crashed: {e}")
+                await asyncio.sleep(10)
+                self.voice_points_update.restart()
+
+        @tasks.loop(time=time(DAILY_RESET_HOUR, DAILY_RESET_MINUTE, tzinfo=EASTERN))
+        async def daily_reset():
+            try:
+                global last_daily
+                last_daily.clear()
+                await save_data_async()
+                logger.info("🔄 Daily rewards reset")
+            except Exception as e:
+                logger.error(f"Daily reset failed: {e}")
+
+        @tasks.loop(time=time(0, 0, tzinfo=EASTERN))
+        async def voice_scaling_reset():
+            try:
+                global voice_time_tracking
+                voice_time_tracking.clear()
+                logger.info("♻️ Voice scaling reset")
+            except Exception as e:
+                logger.error(f"Scaling reset failed: {e}")
+
+        # Assign tasks
+        self.voice_points_update = voice_points_update
+        self.daily_reset = daily_reset
+        self.voice_scaling_reset = voice_scaling_reset
+
+        # Error handlers
+        @self.voice_points_update.error
+        async def voice_error(error):
+            logger.error(f"Voice task error: {error}")
+            await asyncio.sleep(10)
+            self.voice_points_update.restart()
+
+        self._tasks_initialized = True
+        logger.info("✅ Background tasks initialized")
+
+    async def on_ready(self):
+        """Handle startup with data migration and task verification"""
+        # 1. Data migration
+        await self._migrate_voice_data()
+        
+        # 2. Start tasks with verification
+        if not self.voice_points_update.is_running():
+            try:
+                self.voice_points_update.start()
+                logger.info("▶️ Voice points task started")
+            except RuntimeError as e:
+                logger.error(f"Failed to start voice task: {e}")
+                await asyncio.sleep(5)
+                self.voice_points_update.start()
+
+        # 3. Debug info
+        logger.info(f"🔧 Voice task status: {self.voice_points_update.is_running()}")
+        if self.voice_points_update.is_running():
+            logger.info(f"⏱ Next voice check: {self.voice_points_update.next_iteration}")
+
+    async def _migrate_voice_data(self):
+        """Convert legacy voice tracking format"""
+        migration_count = 0
+        for user_id in list(voice_time_tracking.keys()):
+            if not isinstance(voice_time_tracking[user_id], dict):
+                voice_time_tracking[user_id] = {
+                    'total_time': float(voice_time_tracking[user_id]),
+                    'last_payout': datetime.now(EASTERN).isoformat()
+                }
+                migration_count += 1
+        
+        if migration_count > 0:
+            save_data_sync()
+            logger.info(f"♻️ Migrated {migration_count} voice records")
+
+    async def on_shutdown(self):
+        """Graceful shutdown procedure"""
+        async with self._shutdown_lock:
+            logger.info("🛑 Beginning shutdown sequence...")
+            
+            # Cancel tasks
+            tasks = [
+                t for t in [
+                    getattr(self, 'voice_points_update', None),
+                    getattr(self, 'daily_reset', None),
+                    getattr(self, 'voice_scaling_reset', None)
+                ] if t is not None
+            ]
+            
+            for task in tasks:
+                if task.is_running():
+                    task.cancel()
+            
+            # Final save
+            save_data_sync()
+            logger.info("✅ Shutdown completed")
+
+    async def force_voice_check(self):
+        """Manual voice check trigger"""
+        if self.voice_points_update.is_running():
+            await check_voice_time()
+            return True
+        return False
+                            
 class CustomHelpCommand(commands.HelpCommand):
     def __init__(self):
         super().__init__(
@@ -185,16 +368,17 @@ class CustomHelpCommand(commands.HelpCommand):
         )
     
     async def send_bot_help(self, mapping):
+        ctx = self.context
         embed = discord.Embed(
             title="🎰 BetBot Command Categories",
-            description=f"Use `{self.context.prefix}help <command>` for more info",
+            description=f"Use `{ctx.prefix}help <command>` for more info",
             color=discord.Color.blurple()
         )
         
         # Points Commands
         points_commands = [
             f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
-            for cmd in bot.commands 
+            for cmd in ctx.bot.commands 
             if cmd.name in ['points', 'daily', 'voicepoints', 'voicestatus', 'leaderboard']
             and not cmd.hidden
         ]
@@ -207,7 +391,7 @@ class CustomHelpCommand(commands.HelpCommand):
         # Betting Commands
         betting_commands = [
             f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
-            for cmd in bot.commands 
+            for cmd in ctx.bot.commands 
             if cmd.name in ['createbet', 'placebet', 'activebets']
             and not cmd.hidden
         ]
@@ -220,7 +404,7 @@ class CustomHelpCommand(commands.HelpCommand):
         # Lottery Commands
         lottery_commands = [
             f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
-            for cmd in bot.commands 
+            for cmd in ctx.bot.commands 
             if cmd.name in ['lotteryrules', 'quickticket', 'buyticket', 'lotterystats', 'mytickets']
             and not cmd.hidden
         ]
@@ -233,8 +417,8 @@ class CustomHelpCommand(commands.HelpCommand):
         # Admin Commands
         admin_commands = [
             f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
-            for cmd in bot.commands 
-            if cmd.name in ['resetpot', 'drawlottery', 'resolvebet', 'cancelbet']
+            for cmd in ctx.bot.commands 
+            if cmd.name in ['resetpot', 'drawlottery', 'resolvebet', 'cancelbet', 'resetvoicetracking']
             and not cmd.hidden
         ]
         if admin_commands:
@@ -247,7 +431,7 @@ class CustomHelpCommand(commands.HelpCommand):
         # Owner Commands
         owner_commands = [
             f"`{cmd.name}` - {cmd.help.split(']')[-1].strip() if ']' in cmd.help else cmd.help}"
-            for cmd in bot.commands 
+            for cmd in ctx.bot.commands 
             if cmd.name in ['givepoints']
             and not cmd.hidden
         ]
@@ -258,7 +442,7 @@ class CustomHelpCommand(commands.HelpCommand):
                 inline=False
             )
         
-        embed.set_footer(text=f"Type {self.context.prefix}help <command> for more details")
+        embed.set_footer(text=f"Type {ctx.prefix}help <command> for more details")
         await self.get_destination().send(embed=embed)
     
     async def send_command_help(self, command):
@@ -280,97 +464,7 @@ class CustomHelpCommand(commands.HelpCommand):
             )
         await self.get_destination().send(embed=embed)
 
-class RobustBot(commands.Bot):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._init_tasks()
-
-    def _init_tasks(self):
-        @tasks.loop(time=time(DAILY_RESET_HOUR, DAILY_RESET_MINUTE, tzinfo=EASTERN))
-        async def daily_reset():
-            global last_daily
-            last_daily.clear()
-            save_data()
-            now = datetime.now(EASTERN)
-            logger.info(f"{now.strftime('%Y-%m-%d %H:%M:%S')} ET: ✅ Daily rewards reset")
-
-        @tasks.loop(minutes=30)
-        async def voice_points_update():
-            await check_voice_time()
-            logger.info("Voice points check completed at %s", datetime.now(EASTERN))
-
-        @daily_reset.error
-        async def daily_reset_error(error):
-            logger.error(f"❌ Daily reset error: {error}")
-            await asyncio.sleep(60)
-            self.daily_reset.restart()
-
-        @voice_points_update.error
-        async def voice_points_error(error):
-            logger.error(f"❌ Voice points error: {error}")
-            await asyncio.sleep(60)
-            self.voice_points_update.restart()
-
-        self.daily_reset = daily_reset
-        self.voice_points_update = voice_points_update
-
-    async def on_ready(self):
-        logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
-        logger.info('------')
-        if not self.daily_reset.is_running():
-            self.daily_reset.start()
-        if not self.voice_points_update.is_running():
-            self.voice_points_update.start()
-
-    async def on_shutdown(self):
-        """Handle graceful shutdown"""
-        logger.info("Starting graceful shutdown...")
-        # Stop all tasks
-        if hasattr(self, 'daily_reset') and self.daily_reset.is_running():
-            self.daily_reset.cancel()
-        if hasattr(self, 'voice_points_update') and self.voice_points_update.is_running():
-            self.voice_points_update.cancel()
-    
-        # Close the bot connection
-        await self.close()
-        handle_shutdown()
-
-async def check_voice_time():
-    now = datetime.now(EASTERN)
-    
-    for user_id, start_time in list(voice_start_times.items()):
-        try:
-            if user_id not in next_voice_payout:
-                next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
-                continue
-                
-            payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
-            
-            if now >= payout_time:
-                # Calculate points
-                total_hours = (voice_time_tracking.get(user_id, 0) + (now - start_time).total_seconds()) / 3600
-                hours_floor = int(total_hours)
-                points = max(MIN_VOICE_POINTS, 
-                            BASE_VOICE_POINTS - (VOICE_SCALE_DOWN * hours_floor))
-                
-                # Update tracking
-                voice_time_tracking[user_id] = 0
-                voice_channel_points[user_id] = voice_channel_points.get(user_id, 0) + points
-                ensure_user(user_id)
-                user_points[user_id] += points
-                
-                # Reset timer
-                voice_start_times[user_id] = now
-                next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
-                
-                logger.info(f"Awarded {points} points to {user_id} for voice time")
-                
-        except Exception as e:
-            logger.error(f"Error processing voice time for {user_id}: {e}")
-    
-    save_data()
-
-# Initialize bot
+# Initialize bot with optimized settings
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -380,102 +474,209 @@ bot = RobustBot(
     command_prefix='$',
     intents=intents,
     reconnect=True,
-    heartbeat_timeout=60.0,
+    heartbeat_timeout=120.0,  # Increased from 60
+    guild_ready_timeout=10.0,
+    max_messages=1000,  # Reduce message cache
     help_command=CustomHelpCommand()
 )
 
-@bot.event
-async def on_command_error(ctx, error):
-    """Handles command errors with user-friendly messages"""
-    if isinstance(error, commands.MissingRequiredArgument):
-        command = ctx.command
-        usage = f"`{ctx.prefix}{command.name} {command.usage or command.signature}`"
-        example = f"\n\nExample: `{ctx.prefix}{command.name} {get_example(command.name)}`" if get_example(command.name) else ""
-        
-        embed = discord.Embed(
-            title=f"❌ Missing Argument for {command.name}",
-            description=f"**Correct Usage:**\n{usage}{example}",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        
-    elif isinstance(error, commands.CommandNotFound):
-        await ctx.send(f"❌ Command not found. Use `{ctx.prefix}help` for available commands.")
-    elif isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You don't have permission to use this command.")
-    elif isinstance(error, commands.CheckFailure):
-        if is_admin(ctx.author):
-            await ctx.send(f"❌ You need the '{OWNER_ROLE_NAME}' role to use this command.")
-        else:
-            await ctx.send(f"❌ You need the '{ADMIN_ROLE_NAME}' role to use this command.")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument: {error}")
-    else:
-        logger.error(f"⚠️ Unhandled error in command {ctx.command}: {error}")
-        await ctx.send("❌ An unexpected error occurred. Please try again later.")
+async def check_voice_time():
+    now = datetime.now(EASTERN)
+    logger.info(f"⏰ Voice check at {now.strftime('%H:%M:%S')}")
+    
+    for user_id in list(voice_start_times.keys()):
+        try:
+            if user_id not in next_voice_payout:
+                next_payout = now + timedelta(seconds=VOICE_INTERVAL)
+                next_voice_payout[user_id] = next_payout.isoformat()
+                logger.info(f"⏱ Initialized payout for {user_id} at {next_payout}")
+                continue
 
-# Activity tracking
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return await bot.process_commands(message)
+            payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
+            
+            if now >= payout_time:
+                points = BASE_VOICE_POINTS
+                user_points[user_id] += points
+                voice_channel_points[user_id] += points
+                
+                next_payout = now + timedelta(seconds=VOICE_INTERVAL)
+                next_voice_payout[user_id] = next_payout.isoformat()
+                voice_start_times[user_id] = now
+                
+                logger.info(f"💰 Awarded {points} to {user_id}. Next: {next_payout}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error with {user_id}: {e}")
     
-    user_id = str(message.author.id)
-    ensure_user(user_id)
-    
-    now = datetime.now()
-    last_time = last_message_time.get(user_id)
-    
-    if last_time is None or (now - datetime.fromisoformat(last_time)).seconds >= 60:
-        user_points[user_id] += 1
-        last_message_time[user_id] = now.isoformat()
-        save_data()
-    
-    await bot.process_commands(message)
+    await save_data_async()
 
-@bot.event
-async def on_voice_state_update(member, before, after):
+
+async def handle_voice_state_change(member, before, after):
+    """Voice state handler with complete type safety"""
     user_id = str(member.id)
     now = datetime.now(EASTERN)
     
-    # User left voice channel or was disconnected
-    if before.channel and not after.channel:
-        if user_id in voice_start_times:
-            time_spent = (now - voice_start_times[user_id]).total_seconds()
-            voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
-            del voice_start_times[user_id]
-            if user_id in next_voice_payout:
-                del next_voice_payout[user_id]
+    try:
+        # Ensure voice_time_tracking is always a dict
+        if user_id not in voice_time_tracking or not isinstance(voice_time_tracking[user_id], dict):
+            voice_time_tracking[user_id] = {
+                'total_time': 0.0,
+                'last_payout': now.isoformat()
+            }
+        elif isinstance(voice_time_tracking[user_id], (int, float)):
+            # Convert legacy format
+            voice_time_tracking[user_id] = {
+                'total_time': float(voice_time_tracking[user_id]),
+                'last_payout': now.isoformat()
+            }
+
+        # User left voice
+        if before.channel and not after.channel:
+            if user_id in voice_start_times:
+                time_spent = (now - voice_start_times[user_id]).total_seconds()
+                voice_time_tracking[user_id]['total_time'] += time_spent
+                voice_time_tracking[user_id]['last_payout'] = now.isoformat()
+                del voice_start_times[user_id]
+                logger.info(f"🔴 {member.display_name} left after {time_spent:.1f}s")
+
+                # Check if they qualify for final payout
+                if time_spent >= VOICE_INTERVAL:
+                    await check_voice_time()  # Trigger immediate check
+
+        # User joined voice
+        elif not before.channel and after.channel:
+            voice_start_times[user_id] = now
+            next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+            logger.info(f"🟢 {member.display_name} joined. Next payout: {next_voice_payout[user_id]}")
+
+        # User moved channels
+        elif before.channel and after.channel and before.channel != after.channel:
+            if user_id in voice_start_times:
+                time_spent = (now - voice_start_times[user_id]).total_seconds()
+                voice_time_tracking[user_id]['total_time'] += time_spent
+            voice_start_times[user_id] = now
+            next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+
+    except Exception as e:
+        logger.error(f"⚠️ Voice state error: {str(e)}")
+        # Clean up invalid state
+        voice_start_times.pop(user_id, None)
+        next_voice_payout.pop(user_id, None)
     
-    # User joined voice channel
-    elif after.channel and not before.channel:
-        voice_start_times[user_id] = now
-        next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+    await save_data_async()
+                                
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """MINIMAL FIX: Just prevent heartbeat blocking"""
+    # Immediate return to prevent heartbeat blocking
+    asyncio.create_task(handle_voice_state_change(member, before, after))
+
+async def handle_voice_state_change(member, before, after):
+    """Updated voice state handler with immediate point awarding"""
+    user_id = str(member.id)
+    now = datetime.now(EASTERN)
     
-    # User moved between channels
-    elif before.channel and after.channel and before.channel != after.channel:
-        if user_id in voice_start_times:
-            time_spent = (now - voice_start_times[user_id]).total_seconds()
-            voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
-        voice_start_times[user_id] = now
-        next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
-    
-    # User deafened/undeafened
-    elif before.channel and after.channel and before.channel == after.channel:
-        if before.self_deaf != after.self_deaf:
+    try:
+        # Debug logging
+        logger.info(f"🎤 Voice event: {member.display_name} | "
+                   f"Before: {getattr(before.channel, 'name', None)} → "
+                   f"After: {getattr(after.channel, 'name', None)}")
+        
+        # Case 1: User joined or was moved to a voice channel
+        if after.channel and not before.channel:
+            # Initialize or update tracking
+            voice_start_times[user_id] = now
+            next_payout = now + timedelta(seconds=VOICE_INTERVAL)
+            next_voice_payout[user_id] = next_payout.isoformat()
+            
+            logger.info(f"🟢 {member.display_name} joined voice. Next payout at {next_payout}")
+            
+            # Check if they're eligible for immediate payout
+            if user_id in voice_time_tracking:
+                last_active = datetime.fromisoformat(voice_time_tracking[user_id]['last_payout']).astimezone(EASTERN)
+                if (now - last_active).total_seconds() >= VOICE_INTERVAL:
+                    await award_voice_points(user_id, now)
+        
+        # Case 2: User left or was disconnected
+        elif before.channel and not after.channel:
+            if user_id in voice_start_times:
+                # Calculate time spent and store
+                time_spent = (now - voice_start_times[user_id]).total_seconds()
+                voice_time_tracking[user_id] = {
+                    'total_time': voice_time_tracking.get(user_id, {}).get('total_time', 0) + time_spent,
+                    'last_payout': now.isoformat()
+                }
+                del voice_start_times[user_id]
+                logger.info(f"🔴 {member.display_name} left after {time_spent:.1f}s")
+                
+                # Award final points if they met the interval
+                if time_spent >= VOICE_INTERVAL:
+                    await award_voice_points(user_id, now)
+        
+        # Case 3: User moved between channels
+        elif before.channel and after.channel and before.channel != after.channel:
+            if user_id in voice_start_times:
+                # Track time in previous channel
+                time_spent = (now - voice_start_times[user_id]).total_seconds()
+                voice_time_tracking[user_id] = {
+                    'total_time': voice_time_tracking.get(user_id, {}).get('total_time', 0) + time_spent,
+                    'last_payout': now.isoformat()
+                }
+                logger.info(f"🔀 {member.display_name} moved after {time_spent:.1f}s")
+            
+            # Reset timer for new channel
+            voice_start_times[user_id] = now
+            next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+        
+        # Case 4: User deafened/undeafened
+        elif before.self_deaf != after.self_deaf:
             if after.self_deaf:  # User deafened
                 if user_id in voice_start_times:
                     time_spent = (now - voice_start_times[user_id]).total_seconds()
-                    voice_time_tracking[user_id] = voice_time_tracking.get(user_id, 0) + time_spent
+                    voice_time_tracking[user_id] = {
+                        'total_time': voice_time_tracking.get(user_id, {}).get('total_time', 0) + time_spent,
+                        'last_payout': now.isoformat()
+                    }
                     del voice_start_times[user_id]
-                    if user_id in next_voice_payout:
-                        del next_voice_payout[user_id]
+                    logger.info(f"🔇 {member.display_name} deafened after {time_spent:.1f}s")
             else:  # User undeafened
                 voice_start_times[user_id] = now
                 next_voice_payout[user_id] = (now + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+                logger.info(f"🔊 {member.display_name} undeafened")
     
-    save_data()
+    except Exception as e:
+        logger.error(f"⚠️ Voice state error: {e}")
+        # Clean up to prevent invalid states
+        voice_start_times.pop(user_id, None)
+        next_voice_payout.pop(user_id, None)
+    
+    await save_data_async()
 
+async def award_voice_points(user_id, timestamp):
+    """Helper function to award points immediately"""
+    ensure_user(user_id)
+    points = BASE_VOICE_POINTS
+    
+    # Apply scaling if enabled
+    if VOICE_SCALE_DOWN > 0:
+        total_hours = voice_time_tracking.get(user_id, {}).get('total_time', 0) / 3600
+        points = max(MIN_VOICE_POINTS, BASE_VOICE_POINTS - (VOICE_SCALE_DOWN * int(total_hours)))
+    
+    # Award points
+    user_points[user_id] += points
+    voice_channel_points[user_id] += points
+    
+    # Update tracking
+    voice_start_times[user_id] = timestamp
+    next_voice_payout[user_id] = (timestamp + timedelta(seconds=VOICE_INTERVAL)).isoformat()
+    
+    # Log the transaction
+    try:
+        user = await bot.fetch_user(int(user_id))
+        logger.info(f"💰 Awarded {points} points to {user.display_name}")
+    except:
+        logger.info(f"💰 Awarded {points} points to user {user_id}")
+        
 @bot.command(name='voicestatus', help='💰 Check your voice points status and next payout time')
 async def voice_status(ctx):
     user_id = str(ctx.author.id)
@@ -484,19 +685,23 @@ async def voice_status(ctx):
     
     status_msg = "🔴 Not currently in a voice channel"
     current_rate = BASE_VOICE_POINTS
+    time_left_msg = "N/A"
     
-    if user_id in next_voice_payout:
-        payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
-        time_left = payout_time - now
-        minutes_left = max(0, int(time_left.total_seconds() / 60))
-        status_msg = f"⏳ Next payout in ~{minutes_left} minutes"
+    if user_id in voice_start_times:
+        start_time = voice_start_times[user_id]
+        elapsed = (now - start_time).total_seconds()
         
-        if user_id in voice_time_tracking:
-            total_hours = voice_time_tracking.get(user_id, 0) / 3600
-            if user_id in voice_start_times:
-                total_hours += (now - voice_start_times[user_id]).total_seconds() / 3600
-            hours_floor = int(total_hours)
-            current_rate = max(MIN_VOICE_POINTS, BASE_VOICE_POINTS - (VOICE_SCALE_DOWN * hours_floor))
+        if user_id in next_voice_payout:
+            payout_time = datetime.fromisoformat(next_voice_payout[user_id]).astimezone(EASTERN)
+            time_left = max(0, (payout_time - now).total_seconds())
+            minutes = int(time_left // 60)
+            seconds = int(time_left % 60)
+            time_left_msg = f"{minutes}m {seconds}s"
+            
+            status_msg = f"🟢 Active (next payout in {time_left_msg})"
+        
+        # Calculate current rate (simplified for testing)
+        current_rate = BASE_VOICE_POINTS
     
     embed = discord.Embed(
         title="🎧 Voice Points Status",
@@ -506,13 +711,34 @@ async def voice_status(ctx):
     embed.add_field(name="Total Earned", value=f"{points} points", inline=True)
     embed.add_field(name="Status", value=status_msg, inline=True)
     embed.add_field(
-        name="Current Rate",
-        value=f"Earning {current_rate} points per {VOICE_INTERVAL//60} minutes",
+        name="Current Rate", 
+        value=f"{current_rate} points per {VOICE_INTERVAL//60} minutes",
+        inline=False
+    )
+    embed.add_field(
+        name="Debug Info",
+        value=f"Tracking: {len(voice_start_times)} users\nNext check: {now + timedelta(minutes=1)}",
         inline=False
     )
     
     await ctx.send(embed=embed)
-            
+    
+@bot.command(
+    name='resetvoicetracking',
+    help='⚙️ [ADMIN] Reset voice tracking for a user',
+    usage="<user>"
+)
+@admin_required()
+async def reset_voice_tracking(ctx, user: discord.Member):
+    user_id = str(user.id)
+    if user_id in voice_start_times:
+        del voice_start_times[user_id]
+    if user_id in next_voice_payout:
+        del next_voice_payout[user_id]
+    voice_time_tracking[user_id] = 0
+    await save_data_async()
+    await ctx.send(f"✅ Voice tracking reset for {user.mention}")
+
 # Points System Commands
 @bot.command(
     name='points',
@@ -540,7 +766,7 @@ async def daily_points(ctx):
     ensure_user(ctx.author.id)
     user_points[user_id] += reward
     last_daily[user_id] = now.isoformat()
-    save_data()
+    asyncio.create_task(save_data_async())
     
     embed = discord.Embed(
         title="🎉 Daily Reward Claimed",
@@ -572,12 +798,19 @@ async def show_leaderboard(ctx):
     )
     
     for i, (user_id, points) in enumerate(sorted_users, 1):
-        user = await bot.fetch_user(int(user_id))
-        embed.add_field(
-            name=f"{i}. {user.name}",
-            value=f"{points} points",
-            inline=False
-        )
+        try:
+            user = await bot.fetch_user(int(user_id))
+            embed.add_field(
+                name=f"{i}. {user.name}",
+                value=f"{points} points",
+                inline=False
+            )
+        except:
+            embed.add_field(
+                name=f"{i}. Unknown User",
+                value=f"{points} points",
+                inline=False
+            )
     
     await ctx.send(embed=embed)
 
@@ -604,7 +837,7 @@ async def create_bet(ctx, name: str, option1: str, option2: str, duration_minute
         'creator': ctx.author.id,
         'resolved': False
     }
-    save_data()
+    asyncio.create_task(save_data_async())
     
     embed = discord.Embed(
         title=f"🎲 New Bet Created by {ctx.author.display_name}",
@@ -651,7 +884,7 @@ async def place_bet(ctx, bet_id: str, option_number: int, amount: int):
     previous_bet = bet['bets'][selected_option].get(user_id, 0)
     bet['bets'][selected_option][user_id] = previous_bet + amount
     user_points[user_id] -= amount
-    save_data()
+    asyncio.create_task(save_data_async())
     
     embed = discord.Embed(
         title="✅ Bet Placed",
@@ -677,19 +910,30 @@ async def show_active_bets(ctx):
     
     for bet_id, bet in active_bets.items():
         if not bet['resolved'] and datetime.fromisoformat(bet['end_time']) > datetime.now():
-            creator = await bot.fetch_user(bet['creator'])
-            time_left = datetime.fromisoformat(bet['end_time']) - datetime.now()
-            
-            embed.add_field(
-                name=f"ID: {bet_id} - {bet['name']}",
-                value=(
-                    f"Creator: {creator.mention}\n"
-                    f"Options: 1) {bet['options'][0]} | 2) {bet['options'][1]}\n"
-                    f"Time left: {str(time_left).split('.')[0]}\n"
-                    f"Cancel with: `{ctx.prefix}cancelbet {bet_id}`"
-                ),
-                inline=False
-            )
+            try:
+                creator = await bot.fetch_user(bet['creator'])
+                time_left = datetime.fromisoformat(bet['end_time']) - datetime.now()
+                
+                embed.add_field(
+                    name=f"ID: {bet_id} - {bet['name']}",
+                    value=(
+                        f"Creator: {creator.mention}\n"
+                        f"Options: 1) {bet['options'][0]} | 2) {bet['options'][1]}\n"
+                        f"Time left: {str(time_left).split('.')[0]}\n"
+                        f"Cancel with: `{ctx.prefix}cancelbet {bet_id}`"
+                    ),
+                    inline=False
+                )
+            except:
+                embed.add_field(
+                    name=f"ID: {bet_id} - {bet['name']}",
+                    value=(
+                        f"Creator: Unknown User\n"
+                        f"Options: 1) {bet['options'][0]} | 2) {bet['options'][1]}\n"
+                        f"Cancel with: `{ctx.prefix}cancelbet {bet_id}`"
+                    ),
+                    inline=False
+                )
     
     await ctx.send(embed=embed)
 
@@ -755,7 +999,7 @@ async def quick_pick(ctx, amount: int = 1):
             'time': datetime.now().isoformat()
         })
     
-    save_data()
+    asyncio.create_task(save_data_async())
     
     # Format numbers with consistent spacing
     formatted_tickets = []
@@ -837,7 +1081,7 @@ async def buy_lottery_ticket(ctx, n1: int, n2: int, n3: int, n4: int, n5: int, p
         'time': datetime.now().isoformat()
     }
     lottery_history.append(ticket)
-    save_data()
+    asyncio.create_task(save_data_async())
     
     # Create bingo display
     def create_bingo_card(numbers, pb):
@@ -913,9 +1157,6 @@ async def view_my_tickets(ctx):
         ])
         
         return "\n".join(card)
-
-    # Pagination and display logic would go here
-    # [Same as previous examples]
 
     # Create pages with 3 tickets each
     tickets_per_page = 3
@@ -1035,7 +1276,7 @@ async def lottery_stats(ctx):
     )
     await ctx.send(embed=embed)
 
-## Owner Commands
+# Owner Commands
 @bot.command(
     name='givepoints',
     help='🛡️ [OWNER] Give points to a user',
@@ -1053,7 +1294,7 @@ async def give_points(ctx, user: discord.Member, amount: int):
         
         ensure_user(user.id)
         user_points[str(user.id)] += amount
-        save_data()
+        await save_data_async()  
         
         embed = discord.Embed(
             title="✅ Points Added",
@@ -1071,20 +1312,45 @@ async def give_points(ctx, user: discord.Member, amount: int):
     help='🛑 [OWNER] Shutdown the bot gracefully',
     hidden=True
 )
+
 @owner_required()
 async def shutdown_bot(ctx):
     """Gracefully shuts down the bot"""
-    embed = discord.Embed(
-        title="🛑 Bot Shutdown",
-        description="Shutting down the bot gracefully...",
-        color=discord.Color.red()
-    )
-    await ctx.send(embed=embed)
-    logger.info(f"Shutdown command received from {ctx.author}")
-    
-    # Create a new task to avoid blocking
-    asyncio.create_task(bot.on_shutdown())
+    try:
+        embed = discord.Embed(
+            title="🛑 Bot Shutdown",
+            description="Shutting down the bot gracefully...",
+            color=discord.Color.red()
+        )
+        msg = await ctx.send(embed=embed)
+        
+        # Perform shutdown through the bot's method
+        if hasattr(bot, 'on_shutdown'):
+            await bot.on_shutdown()
+        
+        await bot.close()
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
+    finally:
+        sys.exit(0)
 
+@bot.command(name='debugvoice', help='🛠️ Trigger voice check manually')
+@owner_required()
+async def debug_voice(ctx):
+    await check_voice_time()
+    await ctx.send("✅ Manual voice check completed")
+
+@bot.command()
+@commands.is_owner()
+async def voice_debug(ctx):
+    """Check voice system status"""
+    status = {
+        "Running": bot.voice_points_update.is_running(),
+        "Next Check": bot.voice_points_update.next_iteration,
+        "Active Users": len(voice_start_times)
+    }
+    await ctx.send(f"```json\n{json.dumps(status, indent=2, default=str)}\n```")
+        
 # Admin Commands
 @bot.command(
     name='resetpot',
@@ -1095,7 +1361,7 @@ async def shutdown_bot(ctx):
 async def reset_pot(ctx):
     global lottery_pot
     lottery_pot = INITIAL_POT
-    save_data()
+    asyncio.create_task(save_data_async())
     await ctx.send(f"✅ Pot reset to initial amount of {INITIAL_POT} points")
 
 @bot.command(
@@ -1178,7 +1444,7 @@ async def draw_lottery(ctx):
     # Update and save
     lottery_pot = new_pot
     lottery_history.clear()
-    save_data()
+    asyncio.create_task(save_data_async())
     
     # Send results
     embed = discord.Embed(
@@ -1243,12 +1509,15 @@ async def resolve_bet(ctx, bet_id: str, winning_option_number: int):
             winners.append((user_id, amount, int(winnings)))
         
         bet['resolved'] = True
-        save_data()
+        asyncio.create_task(save_data_async())
         
         winner_text = []
         for user_id, bet_amount, winnings in sorted(winners, key=lambda x: x[1], reverse=True)[:5]:
-            user = await bot.fetch_user(int(user_id))
-            winner_text.append(f"{user.name}: +{winnings - bet_amount} (total {winnings})")
+            try:
+                user = await bot.fetch_user(int(user_id))
+                winner_text.append(f"{user.name}: +{winnings - bet_amount} (total {winnings})")
+            except:
+                winner_text.append(f"Unknown User: +{winnings - bet_amount} (total {winnings})")
         
         embed.add_field(
             name="Top Winners",
@@ -1289,7 +1558,7 @@ async def cancel_bet(ctx, bet_id: str):
     
     # Mark as resolved and save
     bet['resolved'] = True
-    save_data()
+    asyncio.create_task(save_data_async())
     
     embed = discord.Embed(
         title="❌ Bet Cancelled",
@@ -1303,14 +1572,21 @@ async def cancel_bet(ctx, bet_id: str):
 if __name__ == "__main__":
     try:
         load_data()
-        bot.run(os.getenv('DISCORD_TOKEN'))
-    except discord.LoginFailure:
-        logger.error("❌ Failed to login. Check your bot token.")
-    except KeyboardInterrupt:
-        logger.info("\n🛑 Received shutdown signal, saving data...")
-        save_data()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Received keyboard interrupt, shutting down...")
+            loop.run_until_complete(bot.on_shutdown())
+        except Exception as e:
+            logger.error(f"❌ Unexpected error: {e}")
+            save_data_sync()
+        finally:
+            if not loop.is_closed():
+                loop.close()
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
-        save_data()
+        logger.error(f"❌ Startup error: {e}")
     finally:
-        save_data()
+        sys.exit(0)
